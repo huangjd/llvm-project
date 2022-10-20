@@ -826,7 +826,8 @@ static void handleExtBinaryWriter(sampleprof::SampleProfileWriter &Writer,
                                   MemoryBuffer *Buffer,
                                   sampleprof::ProfileSymbolList &WriterList,
                                   bool CompressAllSections, bool UseMD5,
-                                  bool GenPartialProfile) {
+                                  bool GenPartialProfile,
+                                  uint32_t FuncProfileCompressOptions) {
   populateProfileSymbolList(Buffer, WriterList);
   if (WriterList.size() > 0 && OutputFormat != PF_Ext_Binary)
     warn("Profile Symbol list is not empty but the output format is not "
@@ -852,6 +853,19 @@ static void handleExtBinaryWriter(sampleprof::SampleProfileWriter &Writer,
     else
       Writer.setPartialProfile();
   }
+
+  if (FuncProfileCompressOptions &
+      (uint32_t) SecFuncProfileFlags::SecFlagCompactZeroEntries) {
+    if (OutputFormat != PF_Ext_Binary)
+      warn("-compact-zero-entries is ignored. Specify -extbinary to enable it");
+  }
+  if (FuncProfileCompressOptions &
+      (uint32_t) SecFuncProfileFlags::SecFlagCompressLineNumber) {
+    if (OutputFormat != PF_Ext_Binary)
+      warn("-compress-line-number is ignored. Specify -extbinary to enable it");
+  }
+  if (FuncProfileCompressOptions)
+    Writer.setFuncProfileCompressOptions(FuncProfileCompressOptions);
 }
 
 static void
@@ -860,7 +874,8 @@ mergeSampleProfile(const WeightedFileVector &Inputs, SymbolRemapper *Remapper,
                    StringRef ProfileSymbolListFile, bool CompressAllSections,
                    bool UseMD5, bool GenPartialProfile, bool GenCSNestedProfile,
                    bool SampleMergeColdContext, bool SampleTrimColdContext,
-                   bool SampleColdContextFrameDepth, FailureMode FailMode) {
+                   bool SampleColdContextFrameDepth, FailureMode FailMode,
+                   uint32_t FuncProfileCompressOptions) {
   using namespace sampleprof;
   SampleProfileMap ProfileMap;
   SmallVector<std::unique_ptr<sampleprof::SampleProfileReader>, 5> Readers;
@@ -950,7 +965,8 @@ mergeSampleProfile(const WeightedFileVector &Inputs, SymbolRemapper *Remapper,
   // Make sure Buffer lives as long as WriterList.
   auto Buffer = getInputFileBuf(ProfileSymbolListFile);
   handleExtBinaryWriter(*Writer, OutputFormat, Buffer.get(), WriterList,
-                        CompressAllSections, UseMD5, GenPartialProfile);
+                        CompressAllSections, UseMD5, GenPartialProfile,
+                        FuncProfileCompressOptions);
   if (std::error_code EC = Writer->write(ProfileMap))
     exitWithErrorCode(std::move(EC));
 }
@@ -1128,8 +1144,24 @@ static int merge_main(int argc, const char *argv[]) {
   cl::opt<std::string> ProfiledBinary(
       "profiled-binary", cl::init(""),
       cl::desc("Path to binary from which the profile was collected."));
+  cl::opt<bool> CompactZeroEntries(
+      "compact-zero-entries", cl::init(false),
+      cl::desc("Compact body sample entries with 0 count to reduce profile "
+               "size"));
+  cl::opt<bool> CompressLineNumber(
+      "compress-line-number", cl::init(false),
+      cl::desc("Use a more compressed way to represent line number and "
+               "discriminator pair to reduce profile size"));
 
   cl::ParseCommandLineOptions(argc, argv, "LLVM profile data merger\n");
+
+  uint32_t FuncProfileCompressOptions = 0;
+  if (CompactZeroEntries)
+    FuncProfileCompressOptions |=
+        static_cast<uint32_t>(SecFuncProfileFlags::SecFlagCompactZeroEntries);
+  if (CompressLineNumber)
+    FuncProfileCompressOptions |=
+        static_cast<uint32_t>(SecFuncProfileFlags::SecFlagCompressLineNumber);
 
   WeightedFileVector WeightedInputs;
   for (StringRef Filename : InputFilenames)
@@ -1176,7 +1208,8 @@ static int merge_main(int argc, const char *argv[]) {
                        OutputFormat, ProfileSymbolListFile, CompressAllSections,
                        UseMD5, GenPartialProfile, GenCSNestedProfile,
                        SampleMergeColdContext, SampleTrimColdContext,
-                       SampleColdContextFrameDepth, FailureMode);
+                       SampleColdContextFrameDepth, FailureMode,
+                       FuncProfileCompressOptions);
   return 0;
 }
 

@@ -67,6 +67,7 @@ public:
   virtual void setToCompressAllSections() {}
   virtual void setUseMD5() {}
   virtual void setPartialProfile() {}
+  virtual void setFuncProfileCompressOptions(uint32_t options) {}
   virtual void resetSecLayout(SectionLayout SL) {}
 
 protected:
@@ -132,7 +133,7 @@ protected:
   std::error_code writeSummary();
   virtual std::error_code writeContextIdx(const SampleContext &Context);
   std::error_code writeNameIdx(StringRef FName);
-  std::error_code writeBody(const FunctionSamples &S);
+  virtual std::error_code writeBody(const FunctionSamples &S);
   inline void stablizeNameTable(MapVector<StringRef, uint32_t> &NameTable,
                                 std::set<StringRef> &V);
 
@@ -212,6 +213,21 @@ public:
     ProfSymList = PSL;
   };
 
+  void setFuncProfileCompressOptions(uint32_t options) override {
+    if (options &
+        static_cast<uint32_t>(SecFuncProfileFlags::SecFlagCompactZeroEntries)) {
+      CompactZeroEntries = true;
+      addSectionFlag(SecLBRProfile,
+                     SecFuncProfileFlags::SecFlagCompactZeroEntries);
+    }
+    if (options &
+        static_cast<uint32_t>(SecFuncProfileFlags::SecFlagCompressLineNumber)) {
+      CompressLineNumber = true;
+      addSectionFlag(SecLBRProfile,
+                     SecFuncProfileFlags::SecFlagCompressLineNumber);
+    }
+  }
+
   void resetSecLayout(SectionLayout SL) override {
     verifySecLayout(SL);
 #ifndef NDEBUG
@@ -283,11 +299,22 @@ protected:
   // in FuncOffsetTable.
   uint64_t SecLBRProfileStart = 0;
 
+  // Correspond to SecFuncProfileFlags::SecFlagCompactZeroEntries.
+  bool CompactZeroEntries = false;
+  // Correspond to SecFuncProfileFlags::SecFlagCompressLineNumber.
+  bool CompressLineNumber = false;
+  // Number of bits required to store the line number with largest value in a
+  // function, including all inlined callsites. Recalculated every time
+  // writeSample is called.
+  unsigned int DiscriminatorOffset;
+
 private:
   void allocSecHdrTable();
   std::error_code writeSecHdrTable();
   std::error_code writeHeader(const SampleProfileMap &ProfileMap) override;
   std::error_code compressAndOutput();
+
+  uint32_t getMaxLineNumber(const FunctionSamples &S);
 
   // We will swap the raw_ostream held by LocalBufStream and that
   // held by OutputStream if we try to add a section which needs
@@ -332,6 +359,7 @@ private:
   std::error_code writeCtxSplitLayout(const SampleProfileMap &ProfileMap);
 
   std::error_code writeSections(const SampleProfileMap &ProfileMap) override;
+  std::error_code writeBody(const FunctionSamples &S) override;
 
   std::error_code writeCustomSection(SecType Type) override {
     return sampleprof_error::success;

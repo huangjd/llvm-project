@@ -610,6 +610,10 @@ protected:
   /// without encoded.
   template <typename T> ErrorOr<T> readUnencodedNumber();
 
+  /// Try to read a "\x80\x00" separator if function profile is using
+  /// compression, otherwise no data is consumed.
+  ErrorOr<bool> tryReadSeparator();
+
   /// Read a string from the profile.
   ///
   /// If an error occurs during decoding, a diagnostic message is emitted and
@@ -628,7 +632,7 @@ protected:
   std::error_code readFuncProfile(const uint8_t *Start);
 
   /// Read the contents of the given profile instance.
-  std::error_code readProfile(FunctionSamples &FProfile);
+  virtual std::error_code readProfile(FunctionSamples &FProfile);
 
   /// Read the contents of Magic number and Version number.
   std::error_code readMagicIdent();
@@ -708,6 +712,7 @@ protected:
                                    FunctionSamples *FProfile);
   std::error_code readFuncOffsetTable();
   std::error_code readFuncProfiles();
+  std::error_code readProfile(FunctionSamples &FProfile) override;
   std::error_code readMD5NameTable();
   std::error_code readNameTableSec(bool IsMD5);
   std::error_code readCSNameTableSec();
@@ -760,6 +765,11 @@ protected:
   bool SkipFlatProf = false;
 
   bool FuncOffsetsOrdered = false;
+
+  /// Correspond to SecFuncProfileFlags::SecFlagCompactZeroEntries.
+  bool CompactZeroEntries = false;
+  /// Correspond to SecFuncProfileFlags::SecFlagCompressLineNumber.
+  bool CompressLineNumber = false;
 
 public:
   SampleProfileReaderExtBinaryBase(std::unique_ptr<MemoryBuffer> B,

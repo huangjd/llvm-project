@@ -153,6 +153,11 @@ SampleProfileWriterExtBinaryBase::writeSample(const FunctionSamples &S) {
   auto &Context = S.getContext();
   FuncOffsetTable[Context] = Offset - SecLBRProfileStart;
   encodeULEB128(S.getHeadSamples(), *OutputStream);
+  if (CompressLineNumber) {
+    uint32_t MaxLineNumber = getMaxLineNumber(S);
+    DiscriminatorOffset = llvm::Log2_32(MaxLineNumber) + 1;
+    encodeULEB128(DiscriminatorOffset, *OutputStream);
+  }
   return writeBody(S);
 }
 
@@ -373,6 +378,21 @@ std::error_code SampleProfileWriterExtBinaryBase::writeOneSection(
   return sampleprof_error::success;
 }
 
+uint32_t
+SampleProfileWriterExtBinaryBase::getMaxLineNumber(const FunctionSamples &S) {
+  uint32_t MaxLineOffset = 0;
+  for (const auto &I : S.getBodySamples())
+    MaxLineOffset = std::max(MaxLineOffset, I.first.LineOffset);
+  for (const auto &J : S.getCallsiteSamples()) {
+    MaxLineOffset = std::max(MaxLineOffset, J.first.LineOffset);
+    for (const auto &FS : J.second) {
+      MaxLineOffset = std::max(MaxLineOffset, getMaxLineNumber(FS.second));
+    }
+  }
+  return MaxLineOffset;
+}
+
+
 std::error_code SampleProfileWriterExtBinary::writeDefaultLayout(
     const SampleProfileMap &ProfileMap) {
   // The const indices passed to writeOneSection below are specifying the
@@ -448,6 +468,155 @@ std::error_code SampleProfileWriterExtBinary::writeSections(
   else
     llvm_unreachable("Unsupported layout");
   return EC;
+}
+
+static void encodeLineLocation(uint64_t LineOffset, uint64_t Discriminator,
+                               unsigned ShiftAmount, raw_ostream &OS) {
+  uint64_t Lower = LineOffset | (Discriminator << ShiftAmount);
+  uint64_t Upper = Discriminator >> (64 - ShiftAmount);
+
+  if (Upper == 0) {
+    encodeULEB128(Lower, OS);
+    return;
+  }
+
+  for (int I = 0; I < 9; I++) {
+    uint8_t Byte = Lower | 0x80;
+    Lower >>= 7;
+    OS << Byte;
+  }
+  uint8_t Byte = (Upper << 1) | Lower;
+  Upper >>= 6;
+  if (Upper == 0)
+    OS << Byte;
+  else {
+    Byte |= 0x80;
+    OS << Byte;
+    encodeULEB128(Upper, OS);
+  }
+}
+
+std::error_code SampleProfileWriterExtBinary::writeBody(const FunctionSamples &S) {
+  auto &OS = *OutputStream;
+  if (std::error_code EC = writeContextIdx(S.getContext()))
+    return EC;
+
+  encodeULEB128(S.getTotalSamples(), OS);
+  encodeULEB128(S.getBodySamples().size(), OS);
+
+  if (CompactZeroEntries) {
+    // Write body samples with non-zero count and no call target, and then write
+    // body samples with zero count and no call target, and then write the rest.
+    // Each part is separated by '\x80\x00'.
+    bool HasZero = false;
+    bool HasCallTargets = false;
+    for (const auto &I : S.getBodySamples()) {
+      LineLocation Loc = I.first;
+      const SampleRecord &Sample = I.second;
+      if (Sample.getCallTargets().size() == 0) {
+        if (Sample.getSamples() > 0) {
+          if (CompressLineNumber)
+            encodeLineLocation(Loc.LineOffset, Loc.Discriminator,
+                               DiscriminatorOffset, OS);
+          else {
+            encodeULEB128(Loc.LineOffset, OS);
+            encodeULEB128(Loc.Discriminator, OS);
+          }
+          encodeULEB128(Sample.getSamples(), OS);
+        } else
+          HasZero = true;
+      } else
+        HasCallTargets = true;
+    }
+
+    // Write body samples with zero count.
+    if (HasZero) {
+      OS << '\x80' << '\x00';
+      for (const auto &I : S.getBodySamples()) {
+        LineLocation Loc = I.first;
+        const SampleRecord &Sample = I.second;
+        if (Sample.getSamples() == 0 && Sample.getCallTargets().size() == 0) {
+          if (CompressLineNumber)
+            encodeLineLocation(Loc.LineOffset, Loc.Discriminator,
+                               DiscriminatorOffset, OS);
+          else {
+            encodeULEB128(Loc.LineOffset, OS);
+            encodeULEB128(Loc.Discriminator, OS);
+          }
+        }
+      }
+    }
+
+    // Write body samples with call targets.
+    if (HasCallTargets) {
+      OS << '\x80' << '\x00';
+      for (const auto &I : S.getBodySamples()) {
+        LineLocation Loc = I.first;
+        const SampleRecord &Sample = I.second;
+        if (Sample.getSamples() > 0) {
+          if (CompressLineNumber)
+            encodeLineLocation(Loc.LineOffset, Loc.Discriminator,
+                               DiscriminatorOffset, OS);
+          else {
+            encodeULEB128(Loc.LineOffset, OS);
+            encodeULEB128(Loc.Discriminator, OS);
+          }
+          encodeULEB128(Sample.getSamples(), OS);
+          encodeULEB128(Sample.getCallTargets().size(), OS);
+          for (const auto &J : Sample.getSortedCallTargets()) {
+            StringRef Callee = J.first;
+            uint64_t CalleeSamples = J.second;
+            if (std::error_code EC = writeNameIdx(Callee))
+              return EC;
+            encodeULEB128(CalleeSamples, OS);
+          }
+        }
+      }
+    }
+  } else
+    // Same as in SampleProfileWriterBinary::writeBody()
+    for (const auto &I : S.getBodySamples()) {
+      LineLocation Loc = I.first;
+      const SampleRecord &Sample = I.second;
+      if (CompressLineNumber)
+        encodeLineLocation(Loc.LineOffset, Loc.Discriminator,
+                           DiscriminatorOffset, OS);
+      else {
+        encodeULEB128(Loc.LineOffset, OS);
+        encodeULEB128(Loc.Discriminator, OS);
+      }
+      encodeULEB128(Sample.getSamples(), OS);
+      encodeULEB128(Sample.getCallTargets().size(), OS);
+      for (const auto &J : Sample.getSortedCallTargets()) {
+        StringRef Callee = J.first;
+        uint64_t CalleeSamples = J.second;
+        if (std::error_code EC = writeNameIdx(Callee))
+          return EC;
+        encodeULEB128(CalleeSamples, OS);
+      }
+    }
+
+  // Recursively emit all the callsite samples.
+  uint64_t NumCallsites = 0;
+  for (const auto &J : S.getCallsiteSamples())
+    NumCallsites += J.second.size();
+  encodeULEB128(NumCallsites, OS);
+  for (const auto &J : S.getCallsiteSamples())
+    for (const auto &FS : J.second) {
+      LineLocation Loc = J.first;
+      const FunctionSamples &CalleeSamples = FS.second;
+      if (CompressLineNumber)
+        encodeLineLocation(Loc.LineOffset, Loc.Discriminator,
+                           DiscriminatorOffset, OS);
+      else {
+        encodeULEB128(Loc.LineOffset, OS);
+        encodeULEB128(Loc.Discriminator, OS);
+      }
+      if (std::error_code EC = writeBody(CalleeSamples))
+        return EC;
+    }
+
+  return sampleprof_error::success;
 }
 
 std::error_code

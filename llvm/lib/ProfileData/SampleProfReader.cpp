@@ -512,6 +512,26 @@ ErrorOr<T> SampleProfileReaderBinary::readUnencodedNumber() {
   return Val;
 }
 
+ErrorOr<bool> SampleProfileReaderBinary::tryReadSeparator() {
+  if (Data + 1 > End) {
+    std::error_code EC = sampleprof_error::truncated;
+    reportError(0, EC.message());
+    return EC;
+  }
+  if (*Data == (uint8_t) '\x80') {
+    if (Data + 2 > End) {
+      std::error_code EC = sampleprof_error::truncated;
+      reportError(0, EC.message());
+      return EC;
+    }
+    if (*(Data + 1) == '\x00') {
+      Data += 2;
+      return true;
+    }
+  }
+  return false;
+}
+
 template <typename T>
 inline ErrorOr<uint32_t> SampleProfileReaderBinary::readStringIndex(T &Table) {
   std::error_code EC;
@@ -752,6 +772,10 @@ std::error_code SampleProfileReaderExtBinaryBase::readOneSection(
     break;
   }
   case SecLBRProfile:
+    CompactZeroEntries =
+        hasSecFlag(Entry, SecFuncProfileFlags::SecFlagCompactZeroEntries);
+    CompressLineNumber =
+        hasSecFlag(Entry, SecFuncProfileFlags::SecFlagCompressLineNumber);
     if (std::error_code EC = readFuncProfiles())
       return EC;
     break;
@@ -923,6 +947,115 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncProfiles() {
          "Cannot have both context-sensitive and regular profile");
   assert((!CSProfileCount || ProfileIsCS) &&
          "Section flag should be consistent with actual profile");
+  return sampleprof_error::success;
+}
+
+std::error_code
+SampleProfileReaderExtBinaryBase::readProfile(FunctionSamples &FProfile) {
+  auto NumSamples = readNumber<uint64_t>();
+  if (std::error_code EC = NumSamples.getError())
+    return EC;
+  FProfile.addTotalSamples(*NumSamples);
+
+  // Read the samples in the body.
+  auto NumRecords = readNumber<uint32_t>();
+  if (std::error_code EC = NumRecords.getError())
+    return EC;
+
+  uint32_t I = 0;
+  for (; I < *NumRecords; ++I) {
+    auto Separator = tryReadSeparator();
+    if (std::error_code EC = NumRecords.getError())
+      return EC;
+    if (*Separator)
+      break;
+
+    auto LineOffset = readNumber<uint64_t>();
+    if (std::error_code EC = LineOffset.getError())
+      return EC;
+
+    if (!isOffsetLegal(*LineOffset)) {
+      return std::error_code();
+    }
+
+    auto Discriminator = readNumber<uint64_t>();
+    if (std::error_code EC = Discriminator.getError())
+      return EC;
+
+    auto NumSamples = readNumber<uint64_t>();
+    if (std::error_code EC = NumSamples.getError())
+      return EC;
+
+    auto NumCalls = readNumber<uint32_t>();
+    if (std::error_code EC = NumCalls.getError())
+      return EC;
+
+    // Here we handle FS discriminators:
+    uint32_t DiscriminatorVal = (*Discriminator) & getDiscriminatorMask();
+
+    for (uint32_t J = 0; J < *NumCalls; ++J) {
+      auto CalledFunction(readStringFromTable());
+      if (std::error_code EC = CalledFunction.getError())
+        return EC;
+
+      auto CalledFunctionSamples = readNumber<uint64_t>();
+      if (std::error_code EC = CalledFunctionSamples.getError())
+        return EC;
+
+      FProfile.addCalledTargetSamples(*LineOffset, DiscriminatorVal,
+                                      *CalledFunction, *CalledFunctionSamples);
+    }
+
+    FProfile.addBodySamples(*LineOffset, DiscriminatorVal, *NumSamples);
+  }
+
+  // Body samples with zero count
+  for (; I < *NumRecords; ++I) {
+    auto LineOffset = readNumber<uint64_t>();
+    if (std::error_code EC = LineOffset.getError())
+      return EC;
+
+    if (!isOffsetLegal(*LineOffset)) {
+      return std::error_code();
+    }
+
+    auto Discriminator = readNumber<uint64_t>();
+    if (std::error_code EC = Discriminator.getError())
+      return EC;
+
+    // Here we handle FS discriminators:
+    uint32_t DiscriminatorVal = (*Discriminator) & getDiscriminatorMask();
+    FProfile.addBodySamples(*LineOffset, DiscriminatorVal, *NumSamples);
+  }
+
+  // Read all the samples for inlined function calls.
+  auto NumCallsites = readNumber<uint32_t>();
+  if (std::error_code EC = NumCallsites.getError())
+    return EC;
+
+  for (uint32_t J = 0; J < *NumCallsites; ++J) {
+    auto LineOffset = readNumber<uint64_t>();
+    if (std::error_code EC = LineOffset.getError())
+      return EC;
+
+    auto Discriminator = readNumber<uint64_t>();
+    if (std::error_code EC = Discriminator.getError())
+      return EC;
+
+    auto FName(readStringFromTable());
+    if (std::error_code EC = FName.getError())
+      return EC;
+
+    // Here we handle FS discriminators:
+    uint32_t DiscriminatorVal = (*Discriminator) & getDiscriminatorMask();
+
+    FunctionSamples &CalleeProfile = FProfile.functionSamplesAt(
+        LineLocation(*LineOffset, DiscriminatorVal))[std::string(*FName)];
+    CalleeProfile.setName(*FName);
+    if (std::error_code EC = readProfile(CalleeProfile))
+      return EC;
+  }
+
   return sampleprof_error::success;
 }
 

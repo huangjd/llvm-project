@@ -91,6 +91,8 @@ public:
                  bool isCallsiteSample = false);
   std::unique_ptr<ProfileSummary>
   computeSummaryForProfiles(const sampleprof::SampleProfileMap &Profiles);
+  std::unique_ptr<ProfileSummary>
+  computeSummaryForProfiles(const ArrayRef<NameFunctionSamples> &Profiles);
   std::unique_ptr<ProfileSummary> getSummary();
 };
 

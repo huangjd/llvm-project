@@ -216,6 +216,26 @@ SampleProfileSummaryBuilder::computeSummaryForProfiles(
   return getSummary();
 }
 
+/// Overload computeSummaryForProfiles to accept pointer to FunctionSamples.
+std::unique_ptr<ProfileSummary>
+SampleProfileSummaryBuilder::computeSummaryForProfiles(
+    const ArrayRef<NameFunctionSamples> &Profiles) {
+  assert(NumFunctions == 0 &&
+         "This can only be called on an empty summary builder");
+  sampleprof::SampleProfileMap ContextLessProfiles;
+  if (UseContextLessSummary || (sampleprof::FunctionSamples::ProfileIsCS &&
+                                !UseContextLessSummary.getNumOccurrences())) {
+    ProfileConverter::flattenProfile(Profiles, ContextLessProfiles, true);
+    for (const auto &I : ContextLessProfiles)
+      addRecord(I.second);
+  } else {
+    for (const auto &I : Profiles)
+      addRecord(*I.second);
+  }
+
+  return getSummary();
+}
+
 std::unique_ptr<ProfileSummary> InstrProfSummaryBuilder::getSummary() {
   computeDetailedSummary();
   return std::make_unique<ProfileSummary>(

@@ -1559,6 +1559,22 @@ public:
     }
   }
 
+  static void flattenProfile(const ArrayRef<NameFunctionSamples> &InputProfiles,
+                             SampleProfileMap &OutputProfiles,
+                             bool ProfileIsCS = false) {
+    if (ProfileIsCS) {
+      for (const auto &I : InputProfiles) {
+        // Retain the profile name and clear the full context for each function
+        // profile.
+        FunctionSamples &FS = OutputProfiles.Create(I.second->getName());
+        FS.merge(*I.second);
+      }
+    } else {
+      for (const auto &I : InputProfiles)
+        flattenNestedProfile(OutputProfiles, *I.second);
+    }
+  }
+
 private:
   static void flattenNestedProfile(SampleProfileMap &OutputProfiles,
                                    const FunctionSamples &FS) {

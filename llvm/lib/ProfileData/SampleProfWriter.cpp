@@ -142,17 +142,15 @@ std::error_code SampleProfileWriter::writeWithSizeLimitInternal(
 }
 
 std::error_code
-SampleProfileWriter::writeFuncProfiles(const SampleProfileMap &ProfileMap) {
-  std::vector<NameFunctionSamples> V;
-  sortFuncProfiles(ProfileMap, V);
-  for (const auto &I : V) {
+SampleProfileWriter::writeFuncProfiles(FunctionSamplesVector &ProfileMap) {
+  for (const auto &I : ProfileMap) {
     if (std::error_code EC = writeSample(*I.second))
       return EC;
   }
   return sampleprof_error::success;
 }
 
-std::error_code SampleProfileWriter::write(const SampleProfileMap &ProfileMap) {
+std::error_code SampleProfileWriter::write(FunctionSamplesVector &ProfileMap) {
   if (std::error_code EC = writeHeader(ProfileMap))
     return EC;
 
@@ -216,7 +214,7 @@ std::error_code SampleProfileWriterExtBinaryBase::addNewSection(
 }
 
 std::error_code
-SampleProfileWriterExtBinaryBase::write(const SampleProfileMap &ProfileMap) {
+SampleProfileWriterExtBinaryBase::write(FunctionSamplesVector &ProfileMap) {
   // When calling write on a different profile map, existing states should be
   // cleared.
   NameTable.clear();
@@ -332,12 +330,12 @@ std::error_code SampleProfileWriterExtBinaryBase::writeFuncMetadata(
 }
 
 std::error_code SampleProfileWriterExtBinaryBase::writeFuncMetadata(
-    const SampleProfileMap &Profiles) {
+    FunctionSamplesVector &Profiles) {
   if (!FunctionSamples::ProfileIsProbeBased && !FunctionSamples::ProfileIsCS &&
       !FunctionSamples::ProfileIsPreInlined)
     return sampleprof_error::success;
   for (const auto &Entry : Profiles) {
-    if (std::error_code EC = writeFuncMetadata(Entry.second))
+    if (std::error_code EC = writeFuncMetadata(*Entry.second))
       return EC;
   }
   return sampleprof_error::success;
@@ -362,10 +360,10 @@ std::error_code SampleProfileWriterExtBinaryBase::writeNameTable() {
 }
 
 std::error_code SampleProfileWriterExtBinaryBase::writeNameTableSection(
-    const SampleProfileMap &ProfileMap) {
+    FunctionSamplesVector &ProfileMap) {
   for (const auto &I : ProfileMap) {
-    addContext(I.second.getContext());
-    addNames(I.second);
+    addContext(I.second->getContext());
+    addNames(*I.second);
   }
 
   // If NameTable contains ".__uniq." suffix, set SecFlagUniqSuffix flag
@@ -421,7 +419,7 @@ SampleProfileWriterExtBinaryBase::writeProfileSymbolListSection() {
 }
 
 std::error_code SampleProfileWriterExtBinaryBase::writeOneSection(
-    SecType Type, uint32_t LayoutIdx, const SampleProfileMap &ProfileMap) {
+    SecType Type, uint32_t LayoutIdx, FunctionSamplesVector &ProfileMap) {
   // The setting of SecFlagCompress should happen before markSectionStart.
   if (Type == SecProfileSymbolList && ProfSymList && ProfSymList->toCompress())
     setToCompressSection(SecProfileSymbolList);
@@ -480,7 +478,7 @@ std::error_code SampleProfileWriterExtBinaryBase::writeOneSection(
 }
 
 std::error_code SampleProfileWriterExtBinary::writeDefaultLayout(
-    const SampleProfileMap &ProfileMap) {
+    FunctionSamplesVector &ProfileMap) {
   // The const indices passed to writeOneSection below are specifying the
   // positions of the sections in SectionHdrLayout. Look at
   // initSectionHdrLayout to find out where each section is located in
@@ -502,20 +500,25 @@ std::error_code SampleProfileWriterExtBinary::writeDefaultLayout(
   return sampleprof_error::success;
 }
 
-static void splitProfileMapToTwo(const SampleProfileMap &ProfileMap,
-                                 SampleProfileMap &ContextProfileMap,
-                                 SampleProfileMap &NoContextProfileMap) {
+static void
+splitProfileMapToTwo(SampleProfileWriter::FunctionSamplesVector &ProfileMap,
+                     std::vector<NameFunctionSamples> &ContextProfileMap,
+                     std::vector<NameFunctionSamples> &NoContextProfileMap) {
+  // ProfileMap is already sorted by total sample count, so splitting it into
+  // two still preserves the order.
   for (const auto &I : ProfileMap) {
-    if (I.second.getCallsiteSamples().size())
-      ContextProfileMap.insert({I.first, I.second});
+    if (I.second->getCallsiteSamples().size())
+      ContextProfileMap.emplace_back(I.first, I.second);
     else
-      NoContextProfileMap.insert({I.first, I.second});
+      NoContextProfileMap.emplace_back(I.first, I.second);
   }
 }
 
 std::error_code SampleProfileWriterExtBinary::writeCtxSplitLayout(
-    const SampleProfileMap &ProfileMap) {
-  SampleProfileMap ContextProfileMap, NoContextProfileMap;
+    FunctionSamplesVector &ProfileMap) {
+  std::vector<NameFunctionSamples> ContextProfileMap, NoContextProfileMap;
+  ContextProfileMap.reserve(ProfileMap.size());
+  NoContextProfileMap.reserve(ProfileMap.size());
   splitProfileMapToTwo(ProfileMap, ContextProfileMap, NoContextProfileMap);
 
   if (auto EC = writeOneSection(SecProfSummary, 0, ProfileMap))
@@ -545,7 +548,7 @@ std::error_code SampleProfileWriterExtBinary::writeCtxSplitLayout(
 }
 
 std::error_code SampleProfileWriterExtBinary::writeSections(
-    const SampleProfileMap &ProfileMap) {
+    FunctionSamplesVector &ProfileMap) {
   std::error_code EC;
   if (SecLayout == DefaultLayout)
     EC = writeDefaultLayout(ProfileMap);
@@ -712,7 +715,7 @@ SampleProfileWriterBinary::writeMagicIdent(SampleProfileFormat Format) {
 }
 
 std::error_code
-SampleProfileWriterBinary::writeHeader(const SampleProfileMap &ProfileMap) {
+SampleProfileWriterBinary::writeHeader(FunctionSamplesVector &ProfileMap) {
   // When calling write on a different profile map, existing names should be
   // cleared.
   NameTable.clear();
@@ -725,8 +728,8 @@ SampleProfileWriterBinary::writeHeader(const SampleProfileMap &ProfileMap) {
 
   // Generate the name table for all the functions referenced in the profile.
   for (const auto &I : ProfileMap) {
-    addContext(I.second.getContext());
-    addNames(I.second);
+    addContext(I.second->getContext());
+    addNames(*I.second);
   }
 
   writeNameTable();
@@ -793,7 +796,7 @@ std::error_code SampleProfileWriterExtBinaryBase::writeSecHdrTable() {
 }
 
 std::error_code SampleProfileWriterExtBinaryBase::writeHeader(
-    const SampleProfileMap &ProfileMap) {
+    FunctionSamplesVector &ProfileMap) {
   auto &OS = *OutputStream;
   FileStart = OS.tell();
   writeMagicIdent(Format);
@@ -928,7 +931,7 @@ SampleProfileWriter::create(std::unique_ptr<raw_ostream> &OS,
   return std::move(Writer);
 }
 
-void SampleProfileWriter::computeSummary(const SampleProfileMap &ProfileMap) {
+void SampleProfileWriter::computeSummary(FunctionSamplesVector &ProfileMap) {
   SampleProfileSummaryBuilder Builder(ProfileSummaryBuilder::DefaultCutoffs);
   Summary = Builder.computeSummaryForProfiles(ProfileMap);
 }

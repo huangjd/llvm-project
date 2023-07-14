@@ -88,6 +88,8 @@ public:
 /// Sample-based profile writer. Base class.
 class SampleProfileWriter {
 public:
+  using FunctionSamplesVector = const llvm::ArrayRef<NameFunctionSamples>;
+
   virtual ~SampleProfileWriter() = default;
 
   /// Write sample profiles in \p S.
@@ -98,7 +100,13 @@ public:
   /// Write all the sample profiles in the given map of samples.
   ///
   /// \returns status code of the file update operation.
-  virtual std::error_code write(const SampleProfileMap &ProfileMap);
+  std::error_code write(const SampleProfileMap &ProfileMap) {
+    std::vector<NameFunctionSamples> SortedProfiles;
+    sortFuncProfiles(ProfileMap, SortedProfiles);
+    return write(SortedProfiles);
+  }
+
+  virtual std::error_code write(FunctionSamplesVector &ProfileMap);
 
   /// Write sample profiles up to given size limit, using the pruning strategy
   /// to drop some functions if necessary.
@@ -135,10 +143,10 @@ protected:
       : OutputStream(std::move(OS)) {}
 
   /// Write a file header for the profile file.
-  virtual std::error_code writeHeader(const SampleProfileMap &ProfileMap) = 0;
+  virtual std::error_code writeHeader(FunctionSamplesVector &ProfileMap) = 0;
 
   // Write function profiles to the profile file.
-  virtual std::error_code writeFuncProfiles(const SampleProfileMap &ProfileMap);
+  virtual std::error_code writeFuncProfiles(FunctionSamplesVector &ProfileMap);
 
   std::error_code writeWithSizeLimitInternal(SampleProfileMap &ProfileMap,
                                              size_t OutputSizeLimit,
@@ -156,7 +164,7 @@ protected:
   std::unique_ptr<ProfileSummary> Summary;
 
   /// Compute summary for this profile.
-  void computeSummary(const SampleProfileMap &ProfileMap);
+  void computeSummary(FunctionSamplesVector &ProfileMap);
 
   /// Profile format.
   SampleProfileFormat Format = SPF_None;
@@ -171,7 +179,7 @@ protected:
   SampleProfileWriterText(std::unique_ptr<raw_ostream> &OS)
       : SampleProfileWriter(OS), Indent(0) {}
 
-  std::error_code writeHeader(const SampleProfileMap &ProfileMap) override {
+  std::error_code writeHeader(FunctionSamplesVector &ProfileMap) override {
     LineCount = 0;
     return sampleprof_error::success;
   }
@@ -199,7 +207,7 @@ protected:
   virtual MapVector<StringRef, uint32_t> &getNameTable() { return NameTable; }
   virtual std::error_code writeMagicIdent(SampleProfileFormat Format);
   virtual std::error_code writeNameTable();
-  std::error_code writeHeader(const SampleProfileMap &ProfileMap) override;
+  std::error_code writeHeader(FunctionSamplesVector &ProfileMap) override;
   std::error_code writeSummary();
   virtual std::error_code writeContextIdx(const SampleContext &Context);
   std::error_code writeNameIdx(StringRef FName);
@@ -257,7 +265,7 @@ const std::array<SmallVector<SecHdrTableEntry, 8>, NumOfLayout>
 class SampleProfileWriterExtBinaryBase : public SampleProfileWriterBinary {
   using SampleProfileWriterBinary::SampleProfileWriterBinary;
 public:
-  std::error_code write(const SampleProfileMap &ProfileMap) override;
+  std::error_code write(FunctionSamplesVector &ProfileMap) override;
 
   void setToCompressAllSections() override;
   void setToCompressSection(SecType Type);
@@ -320,12 +328,12 @@ protected:
   virtual void verifySecLayout(SectionLayout SL) = 0;
 
   // specify the order to write sections.
-  virtual std::error_code writeSections(const SampleProfileMap &ProfileMap) = 0;
+  virtual std::error_code writeSections(FunctionSamplesVector &ProfileMap) = 0;
 
   // Dispatch section writer for each section. \p LayoutIdx is the sequence
   // number indicating where the section is located in SectionHdrLayout.
   virtual std::error_code writeOneSection(SecType Type, uint32_t LayoutIdx,
-                                          const SampleProfileMap &ProfileMap);
+                                          FunctionSamplesVector &ProfileMap);
 
   // Helper function to write name table.
   std::error_code writeNameTable() override;
@@ -333,11 +341,11 @@ protected:
   std::error_code writeCSNameIdx(const SampleContext &Context);
   std::error_code writeCSNameTableSection();
 
-  std::error_code writeFuncMetadata(const SampleProfileMap &Profiles);
+  std::error_code writeFuncMetadata(FunctionSamplesVector &Profiles);
   std::error_code writeFuncMetadata(const FunctionSamples &Profile);
 
   // Functions to write various kinds of sections.
-  std::error_code writeNameTableSection(const SampleProfileMap &ProfileMap);
+  std::error_code writeNameTableSection(FunctionSamplesVector &ProfileMap);
   std::error_code writeFuncOffsetTable();
   std::error_code writeProfileSymbolListSection();
 
@@ -357,7 +365,7 @@ protected:
 private:
   void allocSecHdrTable();
   std::error_code writeSecHdrTable();
-  std::error_code writeHeader(const SampleProfileMap &ProfileMap) override;
+  std::error_code writeHeader(FunctionSamplesVector &ProfileMap) override;
   std::error_code compressAndOutput();
 
   // We will swap the raw_ostream held by LocalBufStream and that
@@ -399,10 +407,10 @@ public:
       : SampleProfileWriterExtBinaryBase(OS) {}
 
 private:
-  std::error_code writeDefaultLayout(const SampleProfileMap &ProfileMap);
-  std::error_code writeCtxSplitLayout(const SampleProfileMap &ProfileMap);
+  std::error_code writeDefaultLayout(FunctionSamplesVector &ProfileMap);
+  std::error_code writeCtxSplitLayout(FunctionSamplesVector &ProfileMap);
 
-  std::error_code writeSections(const SampleProfileMap &ProfileMap) override;
+  std::error_code writeSections(FunctionSamplesVector &ProfileMap) override;
 
   std::error_code writeCustomSection(SecType Type) override {
     return sampleprof_error::success;

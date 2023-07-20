@@ -35,54 +35,22 @@ enum SectionLayout {
   NumOfLayout,
 };
 
-/// When writing a profile with size limit, user may want to use a different
-/// strategy to reduce function count other than dropping functions with fewest
-/// samples first. In this case a class implementing the same interfaces should
-/// be provided to SampleProfileWriter::writeWithSizeLimit().
-class FunctionPruningStrategy {
-protected:
-  SampleProfileMap &ProfileMap;
-  size_t OutputSizeLimit;
 
-public:
-  /// \p ProfileMap A reference to the original profile map. It will be modified
-  /// by Erase().
-  /// \p OutputSizeLimit Size limit in bytes of the output profile. This is
-  /// necessary to estimate how many functions to remove.
-  FunctionPruningStrategy(SampleProfileMap &ProfileMap, size_t OutputSizeLimit)
-      : ProfileMap(ProfileMap), OutputSizeLimit(OutputSizeLimit) {}
-
-  virtual ~FunctionPruningStrategy() = default;
-
-  /// SampleProfileWriter::writeWithSizeLimit() calls this after every write
-  /// iteration if the output size still exceeds the limit. This function
-  /// should erase some functions from the profile map so that the writer tries
-  /// to write the profile again with fewer functions. At least 1 entry from the
-  /// profile map must be erased.
-  ///
-  /// \p CurrentOutputSize Number of bytes in the output if current profile map
-  /// is written.
-  virtual void Erase(size_t CurrentOutputSize) = 0;
-};
-
-class DefaultFunctionPruningStrategy : public FunctionPruningStrategy {
+class DefaultFunctionPruningStrategy {
   std::vector<NameFunctionSamples> SortedFunctions;
+  size_t OutputSizeLimit;
+  size_t Index;
+  size_t Step;
 
 public:
   DefaultFunctionPruningStrategy(SampleProfileMap &ProfileMap,
                                  size_t OutputSizeLimit);
 
-  /// In this default implementation, functions with fewest samples are dropped
-  /// first. Since the exact size of the output cannot be easily calculated due
-  /// to compression, we use a heuristic to remove as many functions as
-  /// necessary but not too many, aiming to minimize the number of write
-  /// iterations.
-  /// Empirically, functions with larger total sample count contain linearly
-  /// more sample entries, meaning it takes linearly more space to write them.
-  /// The cumulative length is therefore quadratic if all functions are sorted
-  /// by total sample count.
-  /// TODO: Find better heuristic.
-  void Erase(size_t CurrentOutputSize) override;
+  operator const llvm::ArrayRef<NameFunctionSamples>() const {
+    return ArrayRef<NameFunctionSamples>(SortedFunctions.data(), Index);
+  }
+
+  bool operator()(size_t CurrentOutputSize);
 };
 
 /// Sample-based profile writer. Base class.
@@ -108,15 +76,82 @@ public:
 
   virtual std::error_code write(FunctionSamplesVector &ProfileMap);
 
-  /// Write sample profiles up to given size limit, using the pruning strategy
-  /// to drop some functions if necessary.
+  /// Write sample profiles up to a given size limit, using a strategy to
+  /// iteratively reduce the amount of content being written.
+  /// The default strategy uses binary search on the vector of function samples
+  /// sorted by their total count, to find a threshold that only function
+  /// samples having a total count greater than which are written.
+  /// The strategy should be a class providing the following interfaces:
+  /// (1) A constructor taking a SampleProfileMap and a size_t for output size
+  /// limit. The profile map may be modified by this class.
+  /// (2) A type conversion function returning a representation of the current
+  /// sample profiles to be written.
+  /// (3) bool operator()(size_t), called after each iteration to write the
+  /// current sample profiles with the argument being the size written. This
+  /// function should either modify the profile map or the class' internal state
+  /// so that in the next iteration (2) returns a profile map (or a slice of it)
+  /// with fewer contents and return true, or return false to indicate it cannot
+  /// modify the profile map further.
+  /// (2) and (3) are called iteratively until either the strategy terminates,
+  /// or all function samples are removed. The strategy should ensure itself
+  /// will terminate.
+  /// Generally the strategy should sort the profile map and return an ArrayRef
+  /// of the sorted NameFunctionSamples for (2), as sample profiles are always
+  /// writen in sorted order, and by doing this it greatly improves performance
+  /// by not sorting the sample profiles in every iteration. However this
+  /// is not a mandatory requirement.
   ///
   /// \returns status code of the file update operation.
-  template <typename FunctionPruningStrategy = DefaultFunctionPruningStrategy>
+  template <typename Strategy = DefaultFunctionPruningStrategy>
   std::error_code writeWithSizeLimit(SampleProfileMap &ProfileMap,
                                      size_t OutputSizeLimit) {
-    FunctionPruningStrategy Strategy(ProfileMap, OutputSizeLimit);
-    return writeWithSizeLimitInternal(ProfileMap, OutputSizeLimit, &Strategy);
+    if (OutputSizeLimit == 0)
+      return write(ProfileMap);
+
+    Strategy S(ProfileMap, OutputSizeLimit);
+
+    size_t TotalSize;
+    std::unique_ptr<raw_ostream> OriginalOutputStream;
+    OutputStream.swap(OriginalOutputStream);
+    SmallVector<char> StringBuffer;
+    do {
+      // Write the current slice of the profile map to a memory buffer to check
+      // the output size.
+      StringBuffer.clear();
+      OutputStream.reset(new raw_svector_ostream(StringBuffer));
+      if (std::error_code EC = write(S))
+        return EC;
+
+      TotalSize = StringBuffer.size();
+      // On Windows every "\n" is actually written as "\r\n" to disk but not to
+      // memory buffer, this difference should be added when calculating the
+      // total output size.
+#ifdef _WIN32
+      if (Format == SPF_Text)
+        TotalSize += LineCount;
+#endif
+
+      // If no function can be written, exit with error to indicate the output
+      // file is not generated, unless we started with an empty profile map.
+      if (ProfileMap.empty())
+        break;
+      else if ((Format == SPF_Text && LineCount == 0) ||
+               ((Format == SPF_Binary || Format == SPF_Ext_Binary)
+                && Summary->getNumFunctions() == 0))
+        return sampleprof_error::too_large;
+
+      // Update the strategy with the output size from this iteration.
+    } while (S(TotalSize));
+
+    // If the strategy cannot reduce the sample profiles within the size limit,
+    // signal an error.
+    if (TotalSize > OutputSizeLimit)
+      return sampleprof_error::too_large;
+
+    // Write the reduced sample profile back to the actual output.
+    OutputStream.swap(OriginalOutputStream);
+    OutputStream->write(StringBuffer.data(), StringBuffer.size());
+    return sampleprof_error::success;
   }
 
   raw_ostream &getOutputStream() { return *OutputStream; }
@@ -147,10 +182,6 @@ protected:
 
   // Write function profiles to the profile file.
   virtual std::error_code writeFuncProfiles(FunctionSamplesVector &ProfileMap);
-
-  std::error_code writeWithSizeLimitInternal(SampleProfileMap &ProfileMap,
-                                             size_t OutputSizeLimit,
-                                             FunctionPruningStrategy *Strategy);
 
   /// For writeWithSizeLimit in text mode, each newline takes 1 additional byte
   /// on Windows when actually written to the file, but not written to a memory

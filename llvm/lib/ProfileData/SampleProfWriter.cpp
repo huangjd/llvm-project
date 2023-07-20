@@ -71,74 +71,64 @@ struct SeekableWriter {
 
 DefaultFunctionPruningStrategy::DefaultFunctionPruningStrategy(
     SampleProfileMap &ProfileMap, size_t OutputSizeLimit)
-    : FunctionPruningStrategy(ProfileMap, OutputSizeLimit) {
+  : OutputSizeLimit(OutputSizeLimit),
+    Index(ProfileMap.size()), Step(std::numeric_limits<size_t>::max()) {
   sortFuncProfiles(ProfileMap, SortedFunctions);
 }
 
-void DefaultFunctionPruningStrategy::Erase(size_t CurrentOutputSize) {
-  double D = (double)OutputSizeLimit / CurrentOutputSize;
-  size_t NewSize = (size_t)round(ProfileMap.size() * D * D);
-  size_t NumToRemove = ProfileMap.size() - NewSize;
-  if (NumToRemove < 1)
-    NumToRemove = 1;
+bool DefaultFunctionPruningStrategy::operator()(size_t CurrentOutputSize) {
+  assert(SortedFunctions.size() != 0);
 
-  assert(NumToRemove <= SortedFunctions.size());
-  llvm::for_each(
-      llvm::make_range(SortedFunctions.begin() + SortedFunctions.size() -
-                           NumToRemove,
-                       SortedFunctions.end()),
-      [&](const NameFunctionSamples &E) { ProfileMap.erase(E.first); });
-  SortedFunctions.resize(SortedFunctions.size() - NumToRemove);
-}
+  // Hitting the exact limit, and we can immediately exit.
+  if (CurrentOutputSize == OutputSizeLimit)
+    return false;
 
-std::error_code SampleProfileWriter::writeWithSizeLimitInternal(
-    SampleProfileMap &ProfileMap, size_t OutputSizeLimit,
-    FunctionPruningStrategy *Strategy) {
-  if (OutputSizeLimit == 0)
-    return write(ProfileMap);
+  // For the first iteration we want to descend as much as possible  before
+  // switching to binary search, because writing a large sample profile is
+  // costly. We use an empirical model where the number of sample entries in a
+  // function is linear to its sample count, so the total length of the entire
+  // profile map is quadratic to the number of functions.
+  if (Index == SortedFunctions.size()) {
+    if (CurrentOutputSize < OutputSizeLimit)
+      return false;
 
-  size_t OriginalFunctionCount = ProfileMap.size();
+    // Usually specified size limit is much smaller than the output size of the
+    // full profile, so we estimate a cutoff point near the head of the sorted
+    // functions where the length of them is still above limit. In this case
+    // binary search only needs to be appled on a much smaller range.
+    size_t Estimate = (size_t)round(
+        SortedFunctions.size() *
+        (1.0 - sqrt(1.0 - (double)OutputSizeLimit / CurrentOutputSize)));
+    Estimate = std::min(Estimate, SortedFunctions.size() - 1);
+    Index = llvm::bit_floor(Estimate);
+    Step = std::numeric_limits<size_t>::max();
+    return true;
+  }
 
-  std::unique_ptr<raw_ostream> OriginalOutputStream;
-  OutputStream.swap(OriginalOutputStream);
+  // This only happens after the first iteration.
+  if (Step == std::numeric_limits<size_t>::max()) {
+    // We only need to search in the subrange of [0..Index).
+    if (CurrentOutputSize > OutputSizeLimit)
+      Step = Index;
+    else {
+      // We overestimated CurrentOutputSize, so we need to reperform binary
+      // search on the entire sample map.
+      Index = 0;
+      Step = llvm::bit_floor(SortedFunctions.size()) * 2;
+    }
+  }
 
-  size_t IterationCount = 0;
-  size_t TotalSize;
+  if (Step == 0)
+    return false;
 
-  SmallVector<char> StringBuffer;
+  // Binary search on each iteration.
+  if (CurrentOutputSize > OutputSizeLimit)
+    Index -= Step;
   do {
-    StringBuffer.clear();
-    OutputStream.reset(new raw_svector_ostream(StringBuffer));
-    if (std::error_code EC = write(ProfileMap))
-      return EC;
-
-    TotalSize = StringBuffer.size();
-    // On Windows every "\n" is actually written as "\r\n" to disk but not to
-    // memory buffer, this difference should be added when considering the total
-    // output size.
-#ifdef _WIN32
-    if (Format == SPF_Text)
-      TotalSize += LineCount;
-#endif
-    if (TotalSize <= OutputSizeLimit)
-      break;
-
-    Strategy->Erase(TotalSize);
-    IterationCount++;
-  } while (ProfileMap.size() != 0);
-
-  if (ProfileMap.size() == 0)
-    return sampleprof_error::too_large;
-
-  OutputStream.swap(OriginalOutputStream);
-  OutputStream->write(StringBuffer.data(), StringBuffer.size());
-  LLVM_DEBUG(dbgs() << "Profile originally has " << OriginalFunctionCount
-                    << " functions, reduced to " << ProfileMap.size() << " in "
-                    << IterationCount << " iterations\n");
-  // Silence warning on Release build.
-  (void)OriginalFunctionCount;
-  (void)IterationCount;
-  return sampleprof_error::success;
+    Step /= 2;
+  } while (Index + Step >= SortedFunctions.size());
+  Index += Step;
+  return true;
 }
 
 std::error_code

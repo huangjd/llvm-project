@@ -40,7 +40,7 @@ class ProfileFuncRef {
   const char *Data = nullptr;
 
   /// Use uint64_t instead of size_t so that it can also hold a MD5 value.
-  uint64_t Length = 0;
+  uint64_t LengthOrHashCode = 0;
 
   /// Extension to memcmp to handle hash code representation. If both are hash
   /// values, Lhs and Rhs are both null, function returns 0 (and needs an extra
@@ -61,11 +61,11 @@ public:
 
   /// Constructor from a StringRef.
   explicit ProfileFuncRef(StringRef Str)
-      : Data(Str.data()), Length(Str.size()) {}
+      : Data(Str.data()), LengthOrHashCode(Str.size()) {}
 
   /// Constructor from a hash code.
   explicit ProfileFuncRef(uint64_t HashCode)
-      : Data(nullptr), Length(HashCode) {
+      : Data(nullptr), LengthOrHashCode(HashCode) {
     assert(HashCode != 0);
   }
 
@@ -74,10 +74,10 @@ public:
   /// if so, convert the numerical string to a hash code first. We assume that
   /// no function name (from a profile) can be a pure number.
   explicit ProfileFuncRef(const std::string &Str)
-      : Data(Str.data()), Length(Str.size()) {
+      : Data(Str.data()), LengthOrHashCode(Str.size()) {
     // Only need to check for base 10 digits, fail faster if otherwise.
     if (Str.length() > 0 && isdigit(Str[0]) &&
-        !StringRef(Str).getAsInteger(10, Length))
+        !StringRef(Str).getAsInteger(10, LengthOrHashCode))
       Data = nullptr;
   }
 
@@ -86,8 +86,8 @@ public:
   /// sufficient. A hash code ProfileFuncName is considered not equal to a
   /// StringRef ProfileFuncName regardless of actual contents.
   bool equals(const ProfileFuncRef &Other) const {
-    return Length == Other.Length &&
-           compareMemory(Data, Other.Data, Length) == 0;
+    return LengthOrHashCode == Other.LengthOrHashCode &&
+           compareMemory(Data, Other.Data, LengthOrHashCode) == 0;
   }
 
   /// Total order comparison. If both ProfileFuncName are StringRef, this is the
@@ -95,20 +95,21 @@ public:
   /// greater than the hash code ProfileFuncName. Otherwise this is the the
   /// same as comparing their int values.
   int compare(const ProfileFuncRef &Other) const {
-    auto Res = compareMemory(Data, Other.Data, std::min(Length, Other.Length));
+    auto Res = compareMemory(
+        Data, Other.Data, std::min(LengthOrHashCode, Other.LengthOrHashCode));
     if (Res != 0)
       return Res;
-    if (Length == Other.Length)
+    if (LengthOrHashCode == Other.LengthOrHashCode)
       return 0;
-    return Length < Other.Length ? -1 : 1;
+    return LengthOrHashCode < Other.LengthOrHashCode ? -1 : 1;
   }
 
   /// Convert to a string, usually for output purpose.
   std::string str() const {
     if (Data)
-      return std::string(Data, Length);
-    if (Length != 0)
-      return std::to_string(Length);
+      return std::string(Data, LengthOrHashCode);
+    if (LengthOrHashCode != 0)
+      return std::to_string(LengthOrHashCode);
     return std::string();
   }
 
@@ -117,9 +118,9 @@ public:
   /// the buffer. If this object represents a StringRef, the buffer is not used.
   StringRef stringRef(std::string &Buffer) const {
     if (Data)
-      return StringRef(Data, Length);
-    if (Length != 0) {
-      Buffer = std::to_string(Length);
+      return StringRef(Data, LengthOrHashCode);
+    if (LengthOrHashCode != 0) {
+      Buffer = std::to_string(LengthOrHashCode);
       return Buffer;
     }
     return StringRef();
@@ -134,11 +135,11 @@ public:
   /// form has the same hash code.
   uint64_t getHashCode() const {
     if (Data)
-      return MD5Hash(StringRef(Data, Length));
-    return Length;
+      return MD5Hash(StringRef(Data, LengthOrHashCode));
+    return LengthOrHashCode;
   }
 
-  bool empty() const { return Length == 0; }
+  bool empty() const { return LengthOrHashCode == 0; }
 
   /// Check if this object represents a StringRef, or a hash code.
   bool isStringRef() const { return Data != nullptr; }
@@ -170,9 +171,9 @@ inline bool operator>=(const ProfileFuncRef &LHS, const ProfileFuncRef &RHS) {
 
 inline raw_ostream &operator<<(raw_ostream &OS, const ProfileFuncRef &Obj) {
   if (Obj.Data)
-    return OS << StringRef(Obj.Data, Obj.Length);
-  if (Obj.Length != 0)
-    return OS << Obj.Length;
+    return OS << StringRef(Obj.Data, Obj.LengthOrHashCode);
+  if (Obj.LengthOrHashCode != 0)
+    return OS << Obj.LengthOrHashCode;
   return OS;
 }
 

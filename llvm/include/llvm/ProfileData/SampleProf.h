@@ -534,7 +534,9 @@ public:
   SampleContext() : State(UnknownContext), Attributes(ContextNone) {}
 
   SampleContext(StringRef Name)
-      : Name(Name), State(UnknownContext), Attributes(ContextNone) {}
+      : Name(Name), State(UnknownContext), Attributes(ContextNone) {
+        assert(!Name.empty() && "Name is empty");
+      }
 
   SampleContext(ProfileFuncRef Name)
       : Name(Name), State(UnknownContext), Attributes(ContextNone) {}

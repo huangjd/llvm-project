@@ -891,7 +891,7 @@ SampleContextFrameVector ProfiledBinary::symbolize(const InstructionPointer &IP,
 
     LineLocation Line(LineOffset, Discriminator);
     auto It = NameStrings.insert(FunctionName.str());
-    CallStack.emplace_back(ProfileFuncRef(*It.first), Line);
+    CallStack.emplace_back(ProfileFuncRef(StringRef(*It.first)), Line);
   }
 
   return CallStack;

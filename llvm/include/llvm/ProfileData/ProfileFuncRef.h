@@ -83,17 +83,17 @@ public:
 
   /// Check for equality. Similar to StringRef::equals, but will also cover for
   /// the case where one or both are hash codes. Comparing their int values are
-  /// sufficient. A hash code ProfileFuncName is considered not equal to a
-  /// StringRef ProfileFuncName regardless of actual contents.
+  /// sufficient. A hash code ProfileFuncRef is considered not equal to a
+  /// StringRef ProfileFuncRef regardless of actual contents.
   bool equals(const ProfileFuncRef &Other) const {
     return LengthOrHashCode == Other.LengthOrHashCode &&
            compareMemory(Data, Other.Data, LengthOrHashCode) == 0;
   }
 
-  /// Total order comparison. If both ProfileFuncName are StringRef, this is the
+  /// Total order comparison. If both ProfileFuncRef are StringRef, this is the
   /// same as StringRef::compare. If one of them is StringRef, it is considered
-  /// greater than the hash code ProfileFuncName. Otherwise this is the the
-  /// same as comparing their int values.
+  /// greater than the hash code ProfileFuncRef. Otherwise this is the the same
+  /// as comparing their int values.
   int compare(const ProfileFuncRef &Other) const {
     auto Res = compareMemory(
         Data, Other.Data, std::min(LengthOrHashCode, Other.LengthOrHashCode));
@@ -187,7 +187,7 @@ inline hash_code hash_value(const sampleprof::ProfileFuncRef &Obj) {
 
 } // end namespace sampleprof
 
-/// Template specialization for ProfileFuncName so that it can be used in LLVM
+/// Template specialization for ProfileFuncRef so that it can be used in LLVM
 /// map containers.
 template <> struct DenseMapInfo<sampleprof::ProfileFuncRef, void> {
 
@@ -213,7 +213,7 @@ template <> struct DenseMapInfo<sampleprof::ProfileFuncRef, void> {
 
 namespace std {
 
-/// Template specialization for ProfileFuncName so that it can be used in STL
+/// Template specialization for ProfileFuncRef so that it can be used in STL
 /// containers.
 template <> struct hash<llvm::sampleprof::ProfileFuncRef> {
   size_t operator()(const llvm::sampleprof::ProfileFuncRef &Val) const {

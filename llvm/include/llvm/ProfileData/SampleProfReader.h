@@ -654,9 +654,6 @@ protected:
   /// Function name table.
   std::vector<ProfileFuncRef> NameTable;
 
-  /// The starting address of fixed length MD5 name table section.
-  const uint8_t *MD5NameMemStart = nullptr;
-
   /// CSNameTable is used to save full context vectors. It is the backing buffer
   /// for SampleContextFrames.
   std::vector<SampleContextFrameVector> CSNameTable;

@@ -529,20 +529,9 @@ SampleProfileReaderBinary::readStringFromTable(size_t *RetIdx) {
   auto Idx = readStringIndex(NameTable);
   if (std::error_code EC = Idx.getError())
     return EC;
-
-  // If using fixed length MD5, just read directly from the pointer to the name
-  // table.
-  ProfileFuncRef &SR = NameTable[*Idx];
-  if (SR.empty()) {
-    assert(MD5NameMemStart);
-    using namespace support;
-    uint64_t FID = endian::read<uint64_t, little, unaligned>(
-       MD5NameMemStart + (*Idx) * sizeof(uint64_t));
-    SR = ProfileFuncRef(FID);
-  }
   if (RetIdx)
     *RetIdx = *Idx;
-  return SR;
+  return NameTable[*Idx];
 }
 
 ErrorOr<SampleContextFrames>
@@ -1118,13 +1107,14 @@ SampleProfileReaderExtBinaryBase::readNameTableSec(bool IsMD5,
     if (Data + (*Size) * sizeof(uint64_t) > End)
       return sampleprof_error::truncated;
 
-    // Preallocate and initialize NameTable so we can check whether a name
-    // index has been read before by checking whether the element in the
-    // NameTable is empty, meanwhile readStringIndex can do the boundary
-    // check using the size of NameTable.
     NameTable.clear();
-    NameTable.resize(*Size);
-    MD5NameMemStart = Data;
+    NameTable.reserve(*Size);
+    for (size_t I = 0; I < *Size; ++I) {
+      using namespace support;
+      uint64_t FID = endian::read<uint64_t, little, unaligned>(
+          Data + I * sizeof(uint64_t));
+      NameTable.emplace_back(ProfileFuncRef(FID));
+    }
     if (!ProfileIsCS)
       MD5SampleContextStart = reinterpret_cast<const uint64_t *>(Data);
     Data = Data + (*Size) * sizeof(uint64_t);

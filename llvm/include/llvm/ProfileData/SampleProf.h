@@ -1142,8 +1142,13 @@ public:
   /// by looking up in the function map GUIDToFuncNameMap.
   /// If the original name doesn't exist in the map, return empty StringRef.
   StringRef getFuncName(ProfileFuncRef Name) const {
-    if (!UseMD5)
-      return reinterpret_cast<StringRef &>(Name);
+    std::string Buffer;
+    if (!UseMD5) {
+      // UseMD5 implies name is StringRef, in this case Buffer should not be
+      // written to.
+      assert(Name.isStringRef());
+      return Name.stringRef(Buffer);
+    }
 
     assert(GUIDToFuncNameMap && "GUIDToFuncNameMap needs to be populated first");
     return GUIDToFuncNameMap->lookup(Name.getHashCode());

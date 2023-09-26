@@ -870,6 +870,7 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncProfiles() {
       }
     }
 
+    std::string Buffer;
     if (ProfileIsCS) {
       assert(useFuncOffsetList());
       DenseSet<uint64_t> FuncGuidsToUse;
@@ -891,7 +892,7 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncProfiles() {
         auto FName = FContext.getName();
         StringRef FNameString;
         if (!useMD5()) {
-          FNameString = reinterpret_cast<StringRef &>(FName);
+          FNameString = FName.stringRef(Buffer);
         }
         // For function in the current module, keep its farthest ancestor
         // context. This can be used to load itself and its child and
@@ -928,7 +929,7 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncProfiles() {
       for (auto NameOffset : FuncOffsetList) {
         SampleContext FContext(NameOffset.first);
         auto FuncName = FContext.getName();
-        StringRef FuncNameStr = reinterpret_cast<StringRef &>(FuncName);
+        StringRef FuncNameStr = FuncName.stringRef(Buffer);
         if (!FuncsToUse.count(FuncNameStr) && !Remapper->exist(FuncNameStr))
           continue;
         const uint8_t *FuncProfileAddr = Start + NameOffset.second;
@@ -1777,6 +1778,7 @@ void SampleProfileReaderItaniumRemapper::applyRemapping(LLVMContext &Ctx) {
     return;
   }
 
+  std::string Buffer;
   // CSSPGO-TODO: Remapper is not yet supported.
   // We will need to remap the entire context string.
   assert(Remappings && "should be initialized while creating remapper");
@@ -1784,7 +1786,7 @@ void SampleProfileReaderItaniumRemapper::applyRemapping(LLVMContext &Ctx) {
     DenseSet<ProfileFuncRef> NamesInSample;
     Sample.second.findAllNames(NamesInSample);
     for (auto &Name : NamesInSample) {
-      StringRef NameStr = reinterpret_cast<StringRef &>(Name);
+      StringRef NameStr = Name.stringRef(Buffer);
       if (auto Key = Remappings->insert(NameStr))
         NameMap.insert({Key, NameStr});
     }

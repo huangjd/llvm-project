@@ -1958,6 +1958,7 @@ SampleProfileLoader::buildFunctionOrder(Module &M, LazyCallGraph &CG) {
 
     std::unique_ptr<ProfiledCallGraph> ProfiledCG = buildProfiledCallGraph(M);
     scc_iterator<ProfiledCallGraph *> CGI = scc_begin(ProfiledCG.get());
+    std::string Buffer;
     while (!CGI.isAtEnd()) {
       auto Range = *CGI;
       if (SortProfiledSCC) {
@@ -1969,7 +1970,7 @@ SampleProfileLoader::buildFunctionOrder(Module &M, LazyCallGraph &CG) {
         Function *F = SymbolMap.lookup(
             FunctionSamples::UseMD5
                 ? GUIDToFuncNameMap.lookup(Node->Name.getHashCode())
-                : reinterpret_cast<StringRef &>(Node->Name));
+                : Node->Name.stringRef(Buffer));
         if (F && !F->isDeclaration() && F->hasFnAttribute("use-sample-profile"))
           FunctionOrderList.push_back(F);
       }

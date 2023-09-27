@@ -1004,8 +1004,6 @@ public:
   /// Optionally scale samples by \p Weight.
   sampleprof_error merge(const FunctionSamples &Other, uint64_t Weight = 1) {
     sampleprof_error Result = sampleprof_error::success;
-    if (!GUIDToFuncNameMap)
-      GUIDToFuncNameMap = Other.GUIDToFuncNameMap;
     if (Context.getName().empty())
       Context = Other.getContext();
     if (FunctionHash == 0) {
@@ -1042,15 +1040,18 @@ public:
   /// corresponding function is no less than \p Threshold, add its corresponding
   /// GUID to \p S. Also traverse the BodySamples to add hot CallTarget's GUID
   /// to \p S.
-  void findInlinedFunctions(DenseSet<GlobalValue::GUID> &S,
-                            const StringMap<Function *> &SymbolMap,
-                            uint64_t Threshold) const {
+  void
+  findInlinedFunctions(DenseSet<GlobalValue::GUID> &S,
+                       const StringMap<Function *> &SymbolMap,
+                       const DenseMap<uint64_t, StringRef> &GUIDToFuncNameMap,
+                       uint64_t Threshold) const {
     if (TotalSamples <= Threshold)
       return;
     auto isDeclaration = [](const Function *F) {
       return !F || F->isDeclaration();
     };
-    if (isDeclaration(SymbolMap.lookup(getFuncName()))) {
+    if (isDeclaration(
+            SymbolMap.lookup(getName().getOriginalName(GUIDToFuncNameMap)))) {
       // Add to the import list only when it's defined out of module.
       S.insert(getGUID());
     }
@@ -1059,13 +1060,15 @@ public:
     for (const auto &BS : BodySamples)
       for (const auto &TS : BS.second.getCallTargets())
         if (TS.second > Threshold) {
-          const Function *Callee = SymbolMap.lookup(getFuncName(TS.first));
+          const Function *Callee =
+              SymbolMap.lookup(TS.first.getOriginalName(GUIDToFuncNameMap));
           if (isDeclaration(Callee))
             S.insert(TS.first.getHashCode());
         }
     for (const auto &CS : CallsiteSamples)
       for (const auto &NameFS : CS.second)
-        NameFS.second.findInlinedFunctions(S, SymbolMap, Threshold);
+        NameFS.second.findInlinedFunctions(S, SymbolMap, GUIDToFuncNameMap,
+                                           Threshold);
   }
 
   /// Set the name of the function.
@@ -1075,9 +1078,6 @@ public:
 
   /// Return the function name.
   ProfileFuncRef getName() const { return Context.getName(); }
-
-  /// Return the original function name.
-  StringRef getFuncName() const { return getFuncName(getName()); }
 
   void setFunctionHash(uint64_t Hash) { FunctionHash = Hash; }
 
@@ -1134,26 +1134,6 @@ public:
     return FnName;
   }
 
-  /// Translate \p Name into its original name.
-  /// When profile doesn't use MD5, \p Name needs no translation.
-  /// When profile uses MD5, \p Name in current FunctionSamples
-  /// is actually GUID of the original function name. getFuncName will
-  /// translate \p Name in current FunctionSamples into its original name
-  /// by looking up in the function map GUIDToFuncNameMap.
-  /// If the original name doesn't exist in the map, return empty StringRef.
-  StringRef getFuncName(ProfileFuncRef Name) const {
-    std::string Buffer;
-    if (!UseMD5) {
-      // UseMD5 implies name is StringRef, in this case Buffer should not be
-      // written to.
-      assert(Name.isStringRef());
-      return Name.stringRef(Buffer);
-    }
-
-    assert(GUIDToFuncNameMap && "GUIDToFuncNameMap needs to be populated first");
-    return GUIDToFuncNameMap->lookup(Name.getHashCode());
-  }
-
   /// Returns the line offset to the start line of the subprogram.
   /// We assume that a single function will not exceed 65535 LOC.
   static unsigned getOffset(const DILocation *DIL);
@@ -1206,10 +1186,6 @@ public:
   /// If this profile uses flow sensitive discriminators.
   static bool ProfileIsFS;
 
-  /// GUIDToFuncNameMap saves the mapping from GUID to the symbol name, for
-  /// all the function symbols defined or declared in current module.
-  DenseMap<uint64_t, StringRef> *GUIDToFuncNameMap = nullptr;
-
   /// Return the GUID of the context's name. If the context is already using
   /// MD5, don't hash it again.
   uint64_t getGUID() const {
@@ -1221,10 +1197,7 @@ public:
   void findAllNames(DenseSet<ProfileFuncRef> &NameSet) const;
 
   bool operator==(const FunctionSamples &Other) const {
-    return (GUIDToFuncNameMap == Other.GUIDToFuncNameMap ||
-            (GUIDToFuncNameMap && Other.GUIDToFuncNameMap &&
-             *GUIDToFuncNameMap == *Other.GUIDToFuncNameMap)) &&
-           FunctionHash == Other.FunctionHash && Context == Other.Context &&
+    return FunctionHash == Other.FunctionHash && Context == Other.Context &&
            TotalSamples == Other.TotalSamples &&
            TotalHeadSamples == Other.TotalHeadSamples &&
            BodySamples == Other.BodySamples &&

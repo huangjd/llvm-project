@@ -451,11 +451,7 @@ SampleContextTracker::getContextString(ContextTrieNode *Node) const {
 void SampleContextTracker::dump() { RootContext.dumpTree(); }
 
 StringRef SampleContextTracker::getFuncNameFor(ContextTrieNode *Node) const {
-  std::string Dummy;
-  if (!FunctionSamples::UseMD5)
-    return Node->getFuncName().stringRef(Dummy);
-  assert(GUIDToFuncNameMap && "GUIDToFuncNameMap needs to be populated first");
-  return GUIDToFuncNameMap->lookup(Node->getFuncName().getHashCode());
+  return Node->getFuncName().getOriginalName(*GUIDToFuncNameMap);
 }
 
 ContextTrieNode *

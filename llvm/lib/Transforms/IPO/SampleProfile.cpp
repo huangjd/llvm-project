@@ -327,74 +327,6 @@ using EdgeWeightMap = DenseMap<Edge, uint64_t>;
 using BlockEdgeMap =
     DenseMap<const BasicBlock *, SmallVector<const BasicBlock *, 8>>;
 
-class GUIDToFuncNameMapper {
-public:
-  GUIDToFuncNameMapper(Module &M, SampleProfileReader &Reader,
-                       DenseMap<uint64_t, StringRef> &GUIDToFuncNameMap)
-      : CurrentReader(Reader), CurrentModule(M),
-        CurrentGUIDToFuncNameMap(GUIDToFuncNameMap) {
-    if (!CurrentReader.useMD5())
-      return;
-
-    for (const auto &F : CurrentModule) {
-      StringRef OrigName = F.getName();
-      CurrentGUIDToFuncNameMap.insert(
-          {Function::getGUID(OrigName), OrigName});
-
-      // Local to global var promotion used by optimization like thinlto
-      // will rename the var and add suffix like ".llvm.xxx" to the
-      // original local name. In sample profile, the suffixes of function
-      // names are all stripped. Since it is possible that the mapper is
-      // built in post-thin-link phase and var promotion has been done,
-      // we need to add the substring of function name without the suffix
-      // into the GUIDToFuncNameMap.
-      StringRef CanonName = FunctionSamples::getCanonicalFnName(F);
-      if (CanonName != OrigName)
-        CurrentGUIDToFuncNameMap.insert(
-            {Function::getGUID(CanonName), CanonName});
-    }
-
-    // Update GUIDToFuncNameMap for each function including inlinees.
-    SetGUIDToFuncNameMapForAll(&CurrentGUIDToFuncNameMap);
-  }
-
-  ~GUIDToFuncNameMapper() {
-    if (!CurrentReader.useMD5())
-      return;
-
-    CurrentGUIDToFuncNameMap.clear();
-
-    // Reset GUIDToFuncNameMap for of each function as they're no
-    // longer valid at this point.
-    SetGUIDToFuncNameMapForAll(nullptr);
-  }
-
-private:
-  void SetGUIDToFuncNameMapForAll(DenseMap<uint64_t, StringRef> *Map) {
-    std::queue<FunctionSamples *> FSToUpdate;
-    for (auto &IFS : CurrentReader.getProfiles()) {
-      FSToUpdate.push(&IFS.second);
-    }
-
-    while (!FSToUpdate.empty()) {
-      FunctionSamples *FS = FSToUpdate.front();
-      FSToUpdate.pop();
-      FS->GUIDToFuncNameMap = Map;
-      for (const auto &ICS : FS->getCallsiteSamples()) {
-        const FunctionSamplesMap &FSMap = ICS.second;
-        for (const auto &IFS : FSMap) {
-          FunctionSamples &FS = const_cast<FunctionSamples &>(IFS.second);
-          FSToUpdate.push(&FS);
-        }
-      }
-    }
-  }
-
-  SampleProfileReader &CurrentReader;
-  Module &CurrentModule;
-  DenseMap<uint64_t, StringRef> &CurrentGUIDToFuncNameMap;
-};
-
 // Inline candidate used by iterative callsite prioritized inliner
 struct InlineCandidate {
   CallBase *CallInstr;
@@ -442,6 +374,7 @@ class SampleProfileMatcher {
   // mapping from the source location of current build to the source location in
   // the profile.
   StringMap<LocToLocMap> FuncMappings;
+  const DenseMap<uint64_t, StringRef> &GUIDToFuncNameMap;
 
   // Profile mismatching statstics.
   uint64_t TotalProfiledCallsites = 0;
@@ -460,8 +393,10 @@ class SampleProfileMatcher {
 
 public:
   SampleProfileMatcher(Module &M, SampleProfileReader &Reader,
-                       const PseudoProbeManager *ProbeManager)
-      : M(M), Reader(Reader), ProbeManager(ProbeManager){};
+                       const PseudoProbeManager *ProbeManager,
+                       const DenseMap<uint64_t, StringRef> &GUIDToFuncNameMap)
+      : M(M), Reader(Reader), ProbeManager(ProbeManager),
+        GUIDToFuncNameMap(GUIDToFuncNameMap){};
   void runOnModule();
 
 private:
@@ -573,6 +508,7 @@ protected:
   std::vector<Function *> buildFunctionOrder(Module &M, LazyCallGraph &CG);
   std::unique_ptr<ProfiledCallGraph> buildProfiledCallGraph(Module &M);
   void generateMDProfMetadata(Function &F);
+  StringRef getOriginalFuncName(const ProfileFuncRef &Func) const;
 
   /// Map from function name to Function *. Used to find the function from
   /// the function name. If the function name contains suffix, additional
@@ -974,7 +910,8 @@ bool SampleProfileLoader::tryPromoteAndInlineCandidate(
   // This prevents allocating an array of zero length in callees below.
   if (MaxNumPromotions == 0)
     return false;
-  auto CalleeFunctionName = Candidate.CalleeSamples->getFuncName();
+  auto CalleeFunctionName =
+      getOriginalFuncName(Candidate.CalleeSamples->getName());
   auto R = SymbolMap.find(CalleeFunctionName);
   if (R == SymbolMap.end() || !R->getValue())
     return false;
@@ -1029,8 +966,8 @@ bool SampleProfileLoader::tryPromoteAndInlineCandidate(
     }
   } else {
     LLVM_DEBUG(dbgs() << "\nFailed to promote indirect call to "
-                      << Candidate.CalleeSamples->getFuncName() << " because "
-                      << Reason << "\n");
+                      << getOriginalFuncName(Candidate.CalleeSamples->getName())
+                      << " because " << Reason << "\n");
   }
   return false;
 }
@@ -1102,7 +1039,7 @@ void SampleProfileLoader::findExternalInlineCandidate(
   // For AutoFDO profile, retrieve candidate profiles by walking over
   // the nested inlinee profiles.
   if (!FunctionSamples::ProfileIsCS) {
-    Samples->findInlinedFunctions(InlinedGUIDs, SymbolMap, Threshold);
+    Samples->findInlinedFunctions(InlinedGUIDs, SymbolMap, GUIDToFuncNameMap, Threshold);
     return;
   }
 
@@ -1126,7 +1063,7 @@ void SampleProfileLoader::findExternalInlineCandidate(
     if (!PreInline && CalleeSample->getHeadSamplesEstimate() < Threshold)
       continue;
 
-    StringRef Name = CalleeSample->getFuncName();
+    StringRef Name = getOriginalFuncName(CalleeSample->getName());
     Function *Func = SymbolMap.lookup(Name);
     // Add to the import list only when it's defined out of module.
     if (!Func || Func->isDeclaration())
@@ -1137,7 +1074,7 @@ void SampleProfileLoader::findExternalInlineCandidate(
     for (const auto &BS : CalleeSample->getBodySamples())
       for (const auto &TS : BS.second.getCallTargets())
         if (TS.second > Threshold) {
-          StringRef CalleeName = CalleeSample->getFuncName(TS.first);
+          StringRef CalleeName = getOriginalFuncName(TS.first);
           const Function *Callee = SymbolMap.lookup(CalleeName);
           if (!Callee || Callee->isDeclaration())
             InlinedGUIDs.insert(TS.first.getHashCode());
@@ -1201,8 +1138,6 @@ bool SampleProfileLoader::inlineHotFunctions(
         if (auto *CB = dyn_cast<CallBase>(&I)) {
           if (!isa<IntrinsicInst>(I)) {
             if ((FS = findCalleeFunctionSamples(*CB))) {
-              assert((!FunctionSamples::UseMD5 || FS->GUIDToFuncNameMap) &&
-                     "GUIDToFuncNameMap has to be populated");
               AllCandidates.push_back(CB);
               if (FS->getHeadSamplesEstimate() > 0 ||
                   FunctionSamples::ProfileIsCS)
@@ -1958,7 +1893,6 @@ SampleProfileLoader::buildFunctionOrder(Module &M, LazyCallGraph &CG) {
 
     std::unique_ptr<ProfiledCallGraph> ProfiledCG = buildProfiledCallGraph(M);
     scc_iterator<ProfiledCallGraph *> CGI = scc_begin(ProfiledCG.get());
-    std::string Buffer;
     while (!CGI.isAtEnd()) {
       auto Range = *CGI;
       if (SortProfiledSCC) {
@@ -1967,10 +1901,7 @@ SampleProfileLoader::buildFunctionOrder(Module &M, LazyCallGraph &CG) {
         Range = *SI;
       }
       for (auto *Node : Range) {
-        Function *F = SymbolMap.lookup(
-            FunctionSamples::UseMD5
-                ? GUIDToFuncNameMap.lookup(Node->Name.getHashCode())
-                : Node->Name.stringRef(Buffer));
+        Function *F = SymbolMap.lookup(getOriginalFuncName(Node->Name));
         if (F && !F->isDeclaration() && F->hasFnAttribute("use-sample-profile"))
           FunctionOrderList.push_back(F);
       }
@@ -1999,6 +1930,18 @@ SampleProfileLoader::buildFunctionOrder(Module &M, LazyCallGraph &CG) {
   });
 
   return FunctionOrderList;
+}
+
+/// Lookup the original function name if Func is an MD5 hash value, or convert
+/// Func to StringRef if it is already representing a StringRef. If Func is an
+/// MD5, it has to match one of the functions in the current module, otherwise
+/// the lookup fails and an empty StringRef is returned.
+StringRef
+SampleProfileLoader::getOriginalFuncName(const ProfileFuncRef &Func) const {
+  assert(Func == ProfileFuncRef() ||
+         Func.isStringRef() != FunctionSamples::UseMD5 &&
+             "Func's representation must match whether the profile uses MD5");
+  return Func.getOriginalName(GUIDToFuncNameMap);
 }
 
 bool SampleProfileLoader::doInitialization(Module &M,
@@ -2111,7 +2054,8 @@ bool SampleProfileLoader::doInitialization(Module &M,
   if (ReportProfileStaleness || PersistProfileStaleness ||
       SalvageStaleProfile) {
     MatchingManager =
-        std::make_unique<SampleProfileMatcher>(M, *Reader, ProbeManager.get());
+        std::make_unique<SampleProfileMatcher>(M, *Reader, ProbeManager.get(),
+                                               GUIDToFuncNameMap);
   }
 
   return true;
@@ -2514,7 +2458,8 @@ void SampleProfileMatcher::runOnModule() {
 
 void SampleProfileMatcher::distributeIRToProfileLocationMap(
     FunctionSamples &FS) {
-  const auto ProfileMappings = FuncMappings.find(FS.getFuncName());
+  const auto ProfileMappings =
+      FuncMappings.find(FS.getName().getOriginalName(GUIDToFuncNameMap));
   if (ProfileMappings != FuncMappings.end()) {
     FS.setIRToProfileLocationMap(&(ProfileMappings->second));
   }
@@ -2537,7 +2482,23 @@ void SampleProfileMatcher::distributeIRToProfileLocationMap() {
 bool SampleProfileLoader::runOnModule(Module &M, ModuleAnalysisManager *AM,
                                       ProfileSummaryInfo *_PSI,
                                       LazyCallGraph &CG) {
-  GUIDToFuncNameMapper Mapper(M, *Reader, GUIDToFuncNameMap);
+  // Populate GUIDToFuncNameMap if the profile is using MD5.
+  if (FunctionSamples::UseMD5) {
+    for (const auto &F : M) {
+      StringRef OrigName = F.getName();
+      GUIDToFuncNameMap.insert({Function::getGUID(OrigName), OrigName});
+      // Local to global var promotion used by optimization like thinlto will
+      // rename the var and add suffix like ".llvm.xxx" to the original local
+      // name. In sample profile, the suffixes of function names are all
+      // stripped. Since it is possible that the mapper is built in
+      // post-thin-link phase and var promotion has been done, we need to add
+      // the substring of function name without the suffix into the
+      // GUIDToFuncNameMap.
+      StringRef CanonName = FunctionSamples::getCanonicalFnName(F);
+      if (CanonName != OrigName)
+        GUIDToFuncNameMap.insert({Function::getGUID(CanonName), CanonName});
+    }
+  }
 
   PSI = _PSI;
   if (M.getProfileSummary(/* IsCS */ false) == nullptr) {

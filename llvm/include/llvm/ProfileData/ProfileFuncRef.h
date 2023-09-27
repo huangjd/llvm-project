@@ -102,7 +102,7 @@ public:
 
   /// Convert to a string, usually for output purpose.
   std::string str() const {
-    if (Data)
+    if (isStringRef())
       return std::string(Data, LengthOrHashCode);
     if (LengthOrHashCode != 0)
       return std::to_string(LengthOrHashCode);
@@ -113,12 +113,26 @@ public:
   /// object represents a hash code, which will be converted to a string into
   /// the buffer. If this object represents a StringRef, the buffer is not used.
   StringRef stringRef(std::string &Buffer) const {
-    if (Data)
+    if (isStringRef())
       return StringRef(Data, LengthOrHashCode);
     if (LengthOrHashCode != 0) {
       Buffer = std::to_string(LengthOrHashCode);
       return Buffer;
     }
+    return StringRef();
+  }
+
+  /// Convert to StringRef with a MD5 hash lookup map. If this object is already
+  /// a StringRef, then lookup is not needed. If this object is a hash code, it
+  /// will lookup the provided map to find the original StringRef, or return an
+  /// empty StringRef if not found.
+  template <typename T>
+  StringRef getOriginalName(const T& GUIDToFuncNameMap) const {
+    if (isStringRef())
+      return StringRef(Data, LengthOrHashCode);
+    auto It = GUIDToFuncNameMap.find(LengthOrHashCode);
+    if (It != GUIDToFuncNameMap.end())
+      return It->second;
     return StringRef();
   }
 
@@ -130,7 +144,7 @@ public:
   /// consistency that the same sample profile function in string form or MD5
   /// form has the same hash code.
   uint64_t getHashCode() const {
-    if (Data)
+    if (isStringRef())
       return MD5Hash(StringRef(Data, LengthOrHashCode));
     return LengthOrHashCode;
   }

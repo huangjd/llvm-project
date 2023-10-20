@@ -752,9 +752,8 @@ adjustInstrProfile(std::unique_ptr<WriterContext> &WC,
       FlattenSampleMap[*NewRootName] =
           std::make_pair(EntrySample, MaxBodySample);
 
-      for (const auto &C : FS.getCallsiteSamples())
-        for (const auto &F : C.second)
-          BuildImpl(F.second, *NewRootName, BuildImpl);
+      for (const auto &F : FS.getCallsiteSamples())
+        BuildImpl(F.second, *NewRootName, BuildImpl);
     };
     BuildMaxSampleMapImpl(FS, RootName, BuildMaxSampleMapImpl);
   };
@@ -909,14 +908,11 @@ remapSamples(const sampleprof::FunctionSamples &Samples,
                                     Remapper(Target.first), Target.second);
     }
   }
-  for (const auto &CallsiteSamples : Samples.getCallsiteSamples()) {
-    sampleprof::FunctionSamplesMap &Target =
-        Result.functionSamplesAt(CallsiteSamples.first);
-    for (const auto &Callsite : CallsiteSamples.second) {
-      sampleprof::FunctionSamples Remapped =
-          remapSamples(Callsite.second, Remapper, Error);
-      MergeResult(Error, Target[Remapped.getFunction()].merge(Remapped));
-    }
+  for (const auto &Callsite : Samples.getCallsiteSamples()) {
+    sampleprof::FunctionSamples Remapped =
+        remapSamples(Callsite.second, Remapper, Error);
+    MergeResult(Error, Result.functionSamplesAt(Callsite.first,
+        Remapped.getContext()).merge(Remapped));
   }
   return Result;
 }
@@ -1519,10 +1515,8 @@ static void getFuncSampleStats(const sampleprof::FunctionSamples &Func,
       ++FuncStats.HotBlockCount;
   }
 
-  for (const auto &C : Func.getCallsiteSamples()) {
-    for (const auto &F : C.second)
-      getFuncSampleStats(F.second, FuncStats, HotThreshold);
-  }
+  for (const auto &F : Func.getCallsiteSamples())
+    getFuncSampleStats(F.second, FuncStats, HotThreshold);
 }
 
 /// Predicate that determines if a function is hot with a given threshold. We
@@ -1862,38 +1856,15 @@ double SampleOverlapAggregator::computeSampleFunctionInternalOverlap(
       auto Callsite = (CallsiteStepStatus == MS_FirstUnique)
                           ? CallsiteIterStep.getFirstIter()
                           : CallsiteIterStep.getSecondIter();
-      for (const auto &F : Callsite->second)
-        updateForUnmatchedCallee(F.second, FuncOverlap, Difference,
-                                 CallsiteStepStatus);
+      updateForUnmatchedCallee(Callsite->second, FuncOverlap, Difference,
+                               CallsiteStepStatus);
     } else {
-      // There may be multiple inlinees at the same offset, so we need to try
-      // matching all of them. This match is implemented through sort-merge
-      // algorithm because callsite records at the same offset are ordered by
-      // function names.
-      MatchStep<FunctionSamplesMap::const_iterator> CalleeIterStep(
-          CallsiteIterStep.getFirstIter()->second.cbegin(),
-          CallsiteIterStep.getFirstIter()->second.cend(),
-          CallsiteIterStep.getSecondIter()->second.cbegin(),
-          CallsiteIterStep.getSecondIter()->second.cend());
-      CalleeIterStep.updateOneStep();
-      while (!CalleeIterStep.areBothFinished()) {
-        MatchStatus CalleeStepStatus = CalleeIterStep.getMatchStatus();
-        if (CalleeStepStatus != MS_Match) {
-          auto Callee = (CalleeStepStatus == MS_FirstUnique)
-                            ? CalleeIterStep.getFirstIter()
-                            : CalleeIterStep.getSecondIter();
-          updateForUnmatchedCallee(Callee->second, FuncOverlap, Difference,
-                                   CalleeStepStatus);
-        } else {
-          // An inlined function can contain other inlinees inside, so compute
-          // the Difference recursively.
-          Difference += 2.0 - 2 * computeSampleFunctionInternalOverlap(
-                                      CalleeIterStep.getFirstIter()->second,
-                                      CalleeIterStep.getSecondIter()->second,
-                                      FuncOverlap);
-        }
-        CalleeIterStep.updateOneStep();
-      }
+      // An inlined function can contain other inlinees inside, so compute
+      // the Difference recursively.
+      Difference += 2.0 - 2 * computeSampleFunctionInternalOverlap(
+                                  CallsiteIterStep.getFirstIter()->second,
+                                  CallsiteIterStep.getSecondIter()->second,
+                                  FuncOverlap);
     }
     CallsiteIterStep.updateOneStep();
   }

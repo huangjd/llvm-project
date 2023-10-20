@@ -123,9 +123,8 @@ void SampleProfileSummaryBuilder::addRecord(
     uint64_t Count = I.second.getSamples();
       addCount(Count);
   }
-  for (const auto &I : FS.getCallsiteSamples())
-    for (const auto &CS : I.second)
-      addRecord(CS.second, true);
+  for (const auto &CS : FS.getCallsiteSamples())
+    addRecord(CS.second, true);
 }
 
 // The argument to this method is a vector of cutoff percentages and the return

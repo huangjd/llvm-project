@@ -176,15 +176,11 @@ void FunctionSamples::print(raw_ostream &OS, unsigned Indent) const {
   OS.indent(Indent);
   if (!CallsiteSamples.empty()) {
     OS << "Samples collected in inlined callsites {\n";
-    SampleSorter<LineLocation, FunctionSamplesMap> SortedCallsiteSamples(
-        CallsiteSamples);
-    for (const auto &CS : SortedCallsiteSamples.get()) {
-      for (const auto &FS : CS->second) {
-        OS.indent(Indent + 2);
-        OS << CS->first << ": inlined callee: " << FS.second.getFunction()
-           << ": ";
-        FS.second.print(OS, Indent + 4);
-      }
+    for (const auto &FS : CallsiteSamples) {
+      OS.indent(Indent + 2);
+      OS << FS.first << ": inlined callee: " << FS.second.getFunction()
+         << ": ";
+      FS.second.print(OS, Indent + 4);
     }
     OS.indent(Indent);
     OS << "}\n";
@@ -267,11 +263,9 @@ void FunctionSamples::findAllNames(DenseSet<FunctionId> &NameSet) const {
     for (const auto &TS : BS.second.getCallTargets())
       NameSet.insert(TS.first);
 
-  for (const auto &CS : CallsiteSamples) {
-    for (const auto &NameFS : CS.second) {
-      NameSet.insert(NameFS.first);
-      NameFS.second.findAllNames(NameSet);
-    }
+  for (const auto &NameFS : CallsiteSamples) {
+    NameSet.insert(NameFS.second.getFunction());
+    NameFS.second.findAllNames(NameSet);
   }
 }
 
@@ -279,18 +273,29 @@ const FunctionSamples *FunctionSamples::findFunctionSamplesAt(
     const LineLocation &Loc, StringRef CalleeName,
     SampleProfileReaderItaniumRemapper *Remapper) const {
   CalleeName = getCanonicalFnName(CalleeName);
+  LineLocation MappedLoc = mapIRLocToProfileLoc(Loc);
 
-  auto iter = CallsiteSamples.find(mapIRLocToProfileLoc(Loc));
-  if (iter == CallsiteSamples.end())
-    return nullptr;
-  auto FS = iter->second.find(getRepInFormat(CalleeName));
-  if (FS != iter->second.end())
-    return &FS->second;
+  auto Range = CallsiteSamples.equal_range(MappedLoc);
+  FunctionId Func = getRepInFormat(CalleeName);
+  for (auto It = Range.first; It != Range.second; It++) {
+    const FunctionSamples &FS = It->second;
+    auto Comp = Func.compare(FS.getFunction());
+    if (Comp == 0)
+      return &FS;
+    if (Comp < 0)
+      break;
+  }
   if (Remapper) {
     if (auto NameInProfile = Remapper->lookUpNameInProfile(CalleeName)) {
-      auto FS = iter->second.find(getRepInFormat(*NameInProfile));
-      if (FS != iter->second.end())
-        return &FS->second;
+      Func = getRepInFormat(*NameInProfile);
+      for (auto It = Range.first; It != Range.second; It++) {
+        const FunctionSamples &FS = It->second;
+        auto Comp = Func.compare(FS.getFunction());
+        if (Comp == 0)
+          return &FS;
+        if (Comp < 0)
+          break;
+      }
     }
   }
   // If we cannot find exact match of the callee name, return the FS with
@@ -300,11 +305,13 @@ const FunctionSamples *FunctionSamples::findFunctionSamplesAt(
     return nullptr;
   uint64_t MaxTotalSamples = 0;
   const FunctionSamples *R = nullptr;
-  for (const auto &NameFS : iter->second)
-    if (NameFS.second.getTotalSamples() >= MaxTotalSamples) {
-      MaxTotalSamples = NameFS.second.getTotalSamples();
-      R = &NameFS.second;
+  for (; Range.first != Range.second; Range.first++) {
+    const auto &NameFS = Range.first->second;
+    if (NameFS.getTotalSamples() >= MaxTotalSamples) {
+      MaxTotalSamples = NameFS.getTotalSamples();
+      R = &NameFS;
     }
+  }
   return R;
 }
 
@@ -463,8 +470,9 @@ void ProfileConverter::convertCSProfiles(ProfileConverter::FrameNode &Node) {
     ChildProfile->getContext().setFunction(OrigChildContext.getFunction());
     if (NodeProfile) {
       // Add child profile to the callsite profile map.
-      auto &SamplesMap = NodeProfile->functionSamplesAt(ChildNode.CallSiteLoc);
-      SamplesMap.emplace(OrigChildContext.getFunction(), *ChildProfile);
+      FunctionSamples &FS = NodeProfile->functionSamplesAt(
+          ChildNode.CallSiteLoc, ChildProfile->getFunction());
+      FS = *ChildProfile;
       NodeProfile->addTotalSamples(ChildProfile->getTotalSamples());
       // Remove the corresponding body sample for the callsite and update the
       // total weight.
@@ -487,9 +495,9 @@ void ProfileConverter::convertCSProfiles(ProfileConverter::FrameNode &Node) {
     } else if (GenerateMergedBaseProfiles) {
       ProfileMap[ChildProfile->getContext()].merge(*ChildProfile);
       NewChildProfileHash = ChildProfile->getContext().getHashCode();
-      auto &SamplesMap = NodeProfile->functionSamplesAt(ChildNode.CallSiteLoc);
-      SamplesMap[ChildProfile->getFunction()].getContext().setAttribute(
-          ContextDuplicatedIntoBase);
+      FunctionSamples &FS = NodeProfile->functionSamplesAt(
+          ChildNode.CallSiteLoc, ChildProfile->getFunction());
+      FS.getContext().setAttribute(ContextDuplicatedIntoBase);
     }
 
     // Remove the original child profile. Check if MD5 of new child profile

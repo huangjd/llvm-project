@@ -311,18 +311,14 @@ std::error_code SampleProfileWriterExtBinaryBase::writeFuncMetadata(
 
   if (!FunctionSamples::ProfileIsCS) {
     // Recursively emit attributes for all callee samples.
-    uint64_t NumCallsites = 0;
-    for (const auto &J : FunctionProfile.getCallsiteSamples())
-      NumCallsites += J.second.size();
+    uint64_t NumCallsites = FunctionProfile.getCallsiteSamples().size();
     encodeULEB128(NumCallsites, OS);
-    for (const auto &J : FunctionProfile.getCallsiteSamples()) {
-      for (const auto &FS : J.second) {
-        LineLocation Loc = J.first;
-        encodeULEB128(Loc.LineOffset, OS);
-        encodeULEB128(Loc.Discriminator, OS);
-        if (std::error_code EC = writeFuncMetadata(FS.second))
-          return EC;
-      }
+    for (const auto &FS : FunctionProfile.getCallsiteSamples()) {
+      LineLocation Loc = FS.first;
+      encodeULEB128(Loc.LineOffset, OS);
+      encodeULEB128(Loc.Discriminator, OS);
+      if (std::error_code EC = writeFuncMetadata(FS.second))
+        return EC;
     }
   }
 
@@ -595,21 +591,18 @@ std::error_code SampleProfileWriterText::writeSample(const FunctionSamples &S) {
     LineCount++;
   }
 
-  SampleSorter<LineLocation, FunctionSamplesMap> SortedCallsiteSamples(
-      S.getCallsiteSamples());
   Indent += 1;
-  for (const auto &I : SortedCallsiteSamples.get())
-    for (const auto &FS : I->second) {
-      LineLocation Loc = I->first;
-      const FunctionSamples &CalleeSamples = FS.second;
-      OS.indent(Indent);
-      if (Loc.Discriminator == 0)
-        OS << Loc.LineOffset << ": ";
-      else
-        OS << Loc.LineOffset << "." << Loc.Discriminator << ": ";
-      if (std::error_code EC = writeSample(CalleeSamples))
-        return EC;
-    }
+  for (const auto &FS : S.getCallsiteSamples()) {
+    LineLocation Loc = FS.first;
+    const FunctionSamples &CalleeSamples = FS.second;
+    OS.indent(Indent);
+    if (Loc.Discriminator == 0)
+      OS << Loc.LineOffset << ": ";
+    else
+      OS << Loc.LineOffset << "." << Loc.Discriminator << ": ";
+    if (std::error_code EC = writeSample(CalleeSamples))
+      return EC;
+  }
   Indent -= 1;
 
   if (FunctionSamples::ProfileIsProbeBased) {
@@ -660,12 +653,11 @@ void SampleProfileWriterBinary::addNames(const FunctionSamples &S) {
   }
 
   // Recursively add all the names for inlined callsites.
-  for (const auto &J : S.getCallsiteSamples())
-    for (const auto &FS : J.second) {
-      const FunctionSamples &CalleeSamples = FS.second;
-      addName(CalleeSamples.getFunction());
-      addNames(CalleeSamples);
-    }
+  for (const auto &FS : S.getCallsiteSamples()) {
+    const FunctionSamples &CalleeSamples = FS.second;
+    addName(CalleeSamples.getFunction());
+    addNames(CalleeSamples);
+  }
 }
 
 void SampleProfileWriterExtBinaryBase::addContext(
@@ -847,19 +839,16 @@ std::error_code SampleProfileWriterBinary::writeBody(const FunctionSamples &S) {
   }
 
   // Recursively emit all the callsite samples.
-  uint64_t NumCallsites = 0;
-  for (const auto &J : S.getCallsiteSamples())
-    NumCallsites += J.second.size();
+  uint64_t NumCallsites = S.getCallsiteSamples().size();
   encodeULEB128(NumCallsites, OS);
-  for (const auto &J : S.getCallsiteSamples())
-    for (const auto &FS : J.second) {
-      LineLocation Loc = J.first;
-      const FunctionSamples &CalleeSamples = FS.second;
-      encodeULEB128(Loc.LineOffset, OS);
-      encodeULEB128(Loc.Discriminator, OS);
-      if (std::error_code EC = writeBody(CalleeSamples))
-        return EC;
-    }
+  for (const auto &FS : S.getCallsiteSamples()) {
+    LineLocation Loc = FS.first;
+    const FunctionSamples &CalleeSamples = FS.second;
+    encodeULEB128(Loc.LineOffset, OS);
+    encodeULEB128(Loc.Discriminator, OS);
+    if (std::error_code EC = writeBody(CalleeSamples))
+      return EC;
+  }
 
   return sampleprof_error::success;
 }

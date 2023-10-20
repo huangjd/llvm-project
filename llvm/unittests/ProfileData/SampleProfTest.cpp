@@ -157,7 +157,7 @@ struct SampleProfTest : ::testing::Test {
     // Add inline instance with name "_Z3gooi".
     FunctionId GooName(StringRef("_Z3gooi"));
     auto &GooSamples =
-        FooSamples.functionSamplesAt(LineLocation(7, 0))[GooName];
+        FooSamples.functionSamplesAt(LineLocation(7, 0), GooName);
     GooSamples.setFunction(GooName);
     GooSamples.addTotalSamples(502);
     GooSamples.addBodySamples(3, 0, 502);
@@ -165,7 +165,7 @@ struct SampleProfTest : ::testing::Test {
     // Add inline instance with name "_Z3hooi".
     FunctionId HooName(StringRef("_Z3hooi"));
     auto &HooSamples =
-        GooSamples.functionSamplesAt(LineLocation(9, 0))[HooName];
+        GooSamples.functionSamplesAt(LineLocation(9, 0), HooName);
     HooSamples.setFunction(HooName);
     HooSamples.addTotalSamples(317);
     HooSamples.addBodySamples(4, 0, 317);

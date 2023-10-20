@@ -105,12 +105,11 @@ SampleCoverageTracker::countUsedRecords(const FunctionSamples *FS,
   // If there are inlined callsites in this function, count the samples found
   // in the respective bodies. However, do not bother counting callees with 0
   // total samples, these are callees that were never invoked at runtime.
-  for (const auto &I : FS->getCallsiteSamples())
-    for (const auto &J : I.second) {
-      const FunctionSamples *CalleeSamples = &J.second;
-      if (callsiteIsHot(CalleeSamples, PSI, ProfAccForSymsInList))
-        Count += countUsedRecords(CalleeSamples, PSI);
-    }
+  for (const auto &J : FS->getCallsiteSamples()) {
+    const FunctionSamples *CalleeSamples = &J.second;
+    if (callsiteIsHot(CalleeSamples, PSI, ProfAccForSymsInList))
+      Count += countUsedRecords(CalleeSamples, PSI);
+  }
 
   return Count;
 }
@@ -124,13 +123,11 @@ SampleCoverageTracker::countBodyRecords(const FunctionSamples *FS,
   unsigned Count = FS->getBodySamples().size();
 
   // Only count records in hot callsites.
-  for (const auto &I : FS->getCallsiteSamples())
-    for (const auto &J : I.second) {
-      const FunctionSamples *CalleeSamples = &J.second;
-      if (callsiteIsHot(CalleeSamples, PSI, ProfAccForSymsInList))
-        Count += countBodyRecords(CalleeSamples, PSI);
-    }
-
+  for (const auto &J : FS->getCallsiteSamples()) {
+    const FunctionSamples *CalleeSamples = &J.second;
+    if (callsiteIsHot(CalleeSamples, PSI, ProfAccForSymsInList))
+      Count += countBodyRecords(CalleeSamples, PSI);
+  }
   return Count;
 }
 
@@ -145,13 +142,11 @@ SampleCoverageTracker::countBodySamples(const FunctionSamples *FS,
     Total += I.second.getSamples();
 
   // Only count samples in hot callsites.
-  for (const auto &I : FS->getCallsiteSamples())
-    for (const auto &J : I.second) {
-      const FunctionSamples *CalleeSamples = &J.second;
-      if (callsiteIsHot(CalleeSamples, PSI, ProfAccForSymsInList))
-        Total += countBodySamples(CalleeSamples, PSI);
-    }
-
+  for (const auto &J : FS->getCallsiteSamples()) {
+    const FunctionSamples *CalleeSamples = &J.second;
+    if (callsiteIsHot(CalleeSamples, PSI, ProfAccForSymsInList))
+      Total += countBodySamples(CalleeSamples, PSI);
+  }
   return Total;
 }
 

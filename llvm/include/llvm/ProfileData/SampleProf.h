@@ -479,6 +479,13 @@ struct SampleContextFrame {
     return !(*this == That);
   }
 
+  bool operator<(const SampleContextFrame &That) const {
+    if (Location == That.Location) {
+      return Func < That.Func;
+    }
+    return Location < That.Location;
+  }
+
   std::string toString(bool OutputLineLocation) const {
     std::ostringstream OContextStr;
     OContextStr << Func.str();
@@ -497,7 +504,7 @@ struct SampleContextFrame {
   }
 };
 
-static inline hash_code hash_value(const SampleContextFrame &arg) {
+static inline uint64_t hash_value(const SampleContextFrame &arg) {
   return arg.getHashCode();
 }
 
@@ -718,7 +725,7 @@ private:
   uint32_t Attributes;
 };
 
-static inline hash_code hash_value(const SampleContext &Context) {
+static inline uint64_t hash_value(const SampleContext &Context) {
   return Context.getHashCode();
 }
 
@@ -730,10 +737,7 @@ class FunctionSamples;
 class SampleProfileReaderItaniumRemapper;
 
 using BodySampleMap = std::map<LineLocation, SampleRecord>;
-// NOTE: Using a StringMap here makes parsed profiles consume around 17% more
-// memory, which is *very* significant for large profiles.
-using FunctionSamplesMap = std::map<FunctionId, FunctionSamples>;
-using CallsiteSampleMap = std::map<LineLocation, FunctionSamplesMap>;
+using CallsiteSampleMap = std::multimap<LineLocation, FunctionSamples>;
 using LocToLocMap =
     std::unordered_map<LineLocation, LineLocation, LineLocationHash>;
 
@@ -838,21 +842,17 @@ public:
     for (const auto &I : BodySamples)
       addTotalSamples(I.second.getSamples());
 
-    for (auto &I : CallsiteSamples) {
-      for (auto &CS : I.second) {
-        CS.second.updateTotalSamples();
-        addTotalSamples(CS.second.getTotalSamples());
-      }
+    for (auto &CS : CallsiteSamples) {
+      CS.second.updateTotalSamples();
+      addTotalSamples(CS.second.getTotalSamples());
     }
   }
 
   // Set current context and all callee contexts to be synthetic.
   void SetContextSynthetic() {
     Context.setState(SyntheticContext);
-    for (auto &I : CallsiteSamples) {
-      for (auto &CS : I.second) {
-        CS.second.SetContextSynthetic();
-      }
+    for (auto &CS : CallsiteSamples) {
+      CS.second.SetContextSynthetic();
     }
   }
 
@@ -903,18 +903,77 @@ public:
     return Ret->second.getCallTargets();
   }
 
-  /// Return the function samples at the given callsite location.
-  FunctionSamplesMap &functionSamplesAt(const LineLocation &Loc) {
-    return CallsiteSamples[mapIRLocToProfileLoc(Loc)];
+  /// Get or create the function samples at the given callsite location \p Loc
+  /// with callee \p Func.
+  FunctionSamples &functionSamplesAt(const LineLocation &Loc,
+                                     const FunctionId &Func) {
+    LineLocation MappedLoc = mapIRLocToProfileLoc(Loc);
+    auto Range = CallsiteSamples.equal_range(MappedLoc);
+    // Ensure callsites at the same location are ordered by FunctionID, so that
+    // only entries up to the match (or the next entry with a larger FunctionID)
+    // need to be checked.
+    for (; Range.first != Range.second; Range.first++) {
+      FunctionSamples &FS = Range.first->second;
+      auto Comp = Func.compare(FS.getFunction());
+      if (Comp == 0)
+        return FS;
+      if (Comp < 0)
+        break;
+    }
+    // If no match is found, insert a new entry right before the next one with a
+    // larger FunctionID.
+    auto It = CallsiteSamples.emplace_hint(Range.first, MappedLoc,
+                                          FunctionSamples());
+    It->second.setFunction(Func);
+    return It->second;
   }
 
-  /// Returns the FunctionSamplesMap at the given \p Loc.
-  const FunctionSamplesMap *
-  findFunctionSamplesMapAt(const LineLocation &Loc) const {
-    auto iter = CallsiteSamples.find(mapIRLocToProfileLoc(Loc));
-    if (iter == CallsiteSamples.end())
-      return nullptr;
-    return &iter->second;
+  /// Get or create the function samples at the given callsite location \p Loc
+  /// with contextless callee \p Ctx.
+  FunctionSamples &functionSamplesAt(const LineLocation &Loc,
+                                     const SampleContext &Ctx) {
+    assert(!Ctx.hasContext());
+    LineLocation MappedLoc = mapIRLocToProfileLoc(Loc);
+    auto Range = CallsiteSamples.equal_range(MappedLoc);
+    // Ensure callsites at the same location are ordered by FunctionID, so that
+    // only entries up to the match (or the next entry with a larger FunctionID)
+    // need to be checked.
+    for (; Range.first != Range.second; Range.first++) {
+      FunctionSamples &FS = Range.first->second;
+      auto Comp = Ctx.getFunction().compare(FS.getFunction());
+      if (Comp == 0)
+        return FS;
+      if (Comp < 0)
+        break;
+    }
+    // If no match is found, insert a new entry right before the next one with a
+    // larger FunctionID.
+    auto It = CallsiteSamples.emplace_hint(Range.first, MappedLoc,
+                                           FunctionSamples());
+    It->second.setContext(Ctx);
+    return It->second;
+  }
+
+  /// Returns a range of all function samples at the given \p Loc.
+  iterator_range<CallsiteSampleMap::const_iterator>
+  findFunctionSamplesRangeAt(const LineLocation &Loc) const {
+    auto Range = CallsiteSamples.equal_range(mapIRLocToProfileLoc(Loc));
+    return iterator_range<CallsiteSampleMap::const_iterator>
+        (Range.first, Range.second);
+  }
+
+  const FunctionSamples *findFunctionSamplesAt(const LineLocation &Loc,
+                                               const FunctionId &Func) const {
+    auto Range = CallsiteSamples.equal_range(mapIRLocToProfileLoc(Loc));
+    for (; Range.first != Range.second; Range.first++) {
+      const FunctionSamples &FS = Range.first->second;
+      auto Comp = Func.compare(FS.getFunction());
+      if (Comp == 0)
+        return &FS;
+      if (Comp < 0)
+        break;
+    }
+    return nullptr;
   }
 
   /// Returns a pointer to FunctionSamples at the given callsite location
@@ -961,8 +1020,10 @@ public:
     else if (!CallsiteSamples.empty()) {
       // An indirect callsite may be promoted to several inlined direct calls.
       // We need to get the sum of them.
-      for (const auto &N_FS : CallsiteSamples.begin()->second)
-        Count += N_FS.second.getHeadSamplesEstimate();
+      LineLocation FirstLoc = CallsiteSamples.begin()->first;
+      for (const auto &Callsite : findFunctionSamplesRangeAt(FirstLoc)) {
+        Count += Callsite.second.getHeadSamplesEstimate();
+      }
     }
     // Return at least 1 if total sample is not 0.
     return Count ? Count : TotalSamples > 0;
@@ -986,9 +1047,8 @@ public:
       MaxCount = std::max(MaxCount, L.second.getSamples());
     if (SkipCallSite)
       return MaxCount;
-    for (const auto &C : getCallsiteSamples())
-      for (const FunctionSamplesMap::value_type &F : C.second)
-        MaxCount = std::max(MaxCount, F.second.getMaxCountInside());
+    for (const auto &Callsite : getCallsiteSamples())
+      MaxCount = std::max(MaxCount, Callsite.second.getMaxCountInside());
     return MaxCount;
   }
 
@@ -1021,11 +1081,9 @@ public:
       const SampleRecord &Rec = I.second;
       MergeResult(Result, BodySamples[Loc].merge(Rec, Weight));
     }
-    for (const auto &I : Other.getCallsiteSamples()) {
-      const LineLocation &Loc = I.first;
-      FunctionSamplesMap &FSMap = functionSamplesAt(Loc);
-      for (const auto &Rec : I.second)
-        MergeResult(Result, FSMap[Rec.first].merge(Rec.second, Weight));
+    for (const auto &Callsite : Other.getCallsiteSamples()) {
+      MergeResult(Result, functionSamplesAt(Callsite.first,
+          Callsite.second.getContext()).merge(Callsite.second, Weight));
     }
     return Result;
   }
@@ -1056,9 +1114,8 @@ public:
           if (isDeclaration(Callee))
             S.insert(TS.first.getHashCode());
         }
-    for (const auto &CS : CallsiteSamples)
-      for (const auto &NameFS : CS.second)
-        NameFS.second.findInlinedFunctions(S, SymbolMap, Threshold);
+    for (const auto &NameFS : CallsiteSamples)
+      NameFS.second.findInlinedFunctions(S, SymbolMap, Threshold);
   }
 
   /// Set the name of the function.
@@ -1465,25 +1522,24 @@ private:
     // All_of_Callsite_HeadSamples" to compute the new TotalSamples.
     uint64_t TotalSamples = FS.getTotalSamples();
 
-    for (const auto &I : FS.getCallsiteSamples()) {
-      for (const auto &Callee : I.second) {
-        const auto &CalleeProfile = Callee.second;
-        // Add body sample.
-        Profile.addBodySamples(I.first.LineOffset, I.first.Discriminator,
-                               CalleeProfile.getHeadSamplesEstimate());
-        // Add callsite sample.
-        Profile.addCalledTargetSamples(
-            I.first.LineOffset, I.first.Discriminator,
-            CalleeProfile.getFunction(),
-            CalleeProfile.getHeadSamplesEstimate());
-        // Update total samples.
-        TotalSamples = TotalSamples >= CalleeProfile.getTotalSamples()
-                           ? TotalSamples - CalleeProfile.getTotalSamples()
-                           : 0;
-        TotalSamples += CalleeProfile.getHeadSamplesEstimate();
-        // Recursively convert callee profile.
-        flattenNestedProfile(OutputProfiles, CalleeProfile);
-      }
+    for (const auto &Callee : FS.getCallsiteSamples()) {
+      const auto &CalleeProfile = Callee.second;
+      // Add body sample.
+      Profile.addBodySamples(Callee.first.LineOffset,
+                             Callee.first.Discriminator,
+                             CalleeProfile.getHeadSamplesEstimate());
+      // Add callsite sample.
+      Profile.addCalledTargetSamples(Callee.first.LineOffset,
+          Callee.first.Discriminator,
+          CalleeProfile.getFunction(),
+          CalleeProfile.getHeadSamplesEstimate());
+      // Update total samples.
+      TotalSamples = TotalSamples >= CalleeProfile.getTotalSamples()
+                         ? TotalSamples - CalleeProfile.getTotalSamples()
+                         : 0;
+      TotalSamples += CalleeProfile.getHeadSamplesEstimate();
+      // Recursively convert callee profile.
+      flattenNestedProfile(OutputProfiles, CalleeProfile);
     }
     Profile.addTotalSamples(TotalSamples);
 

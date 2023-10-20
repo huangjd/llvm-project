@@ -102,18 +102,17 @@ static void dumpFunctionProfileJson(const FunctionSamples &S,
   };
 
   auto DumpCallsiteSamples = [&](const CallsiteSampleMap &CallsiteSamples) {
-    for (const auto &I : CallsiteSamples)
-      for (const auto &FS : I.second) {
-        const LineLocation &Loc = I.first;
-        const FunctionSamples &CalleeSamples = FS.second;
-        JOS.object([&] {
-          JOS.attribute("line", Loc.LineOffset);
-          if (Loc.Discriminator)
-            JOS.attribute("discriminator", Loc.Discriminator);
-          JOS.attributeArray(
-              "samples", [&] { dumpFunctionProfileJson(CalleeSamples, JOS); });
-        });
-      }
+    for (const auto &FS : CallsiteSamples) {
+      const LineLocation &Loc = FS.first;
+      const FunctionSamples &CalleeSamples = FS.second;
+      JOS.object([&] {
+        JOS.attribute("line", Loc.LineOffset);
+        if (Loc.Discriminator)
+          JOS.attribute("discriminator", Loc.Discriminator);
+        JOS.attributeArray(
+            "samples", [&] { dumpFunctionProfileJson(CalleeSamples, JOS); });
+      });
+    }
   };
 
   JOS.object([&] {
@@ -392,7 +391,7 @@ std::error_code SampleProfileReaderText::readImpl() {
       switch (LineTy) {
       case LineType::CallSiteProfile: {
         FunctionSamples &FSamples = InlineStack.back()->functionSamplesAt(
-            LineLocation(LineOffset, Discriminator))[FunctionId(FName)];
+            LineLocation(LineOffset, Discriminator), FunctionId(FName));
         FSamples.setFunction(FunctionId(FName));
         MergeResult(Result, FSamples.addTotalSamples(NumSamples));
         InlineStack.push_back(&FSamples);
@@ -642,7 +641,7 @@ SampleProfileReaderBinary::readProfile(FunctionSamples &FProfile) {
     uint32_t DiscriminatorVal = (*Discriminator) & getDiscriminatorMask();
 
     FunctionSamples &CalleeProfile = FProfile.functionSamplesAt(
-        LineLocation(*LineOffset, DiscriminatorVal))[*FName];
+        LineLocation(*LineOffset, DiscriminatorVal), *FName);
     CalleeProfile.setFunction(*FName);
     if (std::error_code EC = readProfile(CalleeProfile))
       return EC;
@@ -1229,10 +1228,9 @@ SampleProfileReaderExtBinaryBase::readFuncMetadata(bool ProfileHasAttribute,
         auto &[FContext, Hash] = *FContextHash;
         FunctionSamples *CalleeProfile = nullptr;
         if (FProfile) {
-          CalleeProfile = const_cast<FunctionSamples *>(
-              &FProfile->functionSamplesAt(LineLocation(
-                  *LineOffset,
-                  *Discriminator))[FContext.getFunction()]);
+          CalleeProfile = &FProfile->functionSamplesAt(
+              LineLocation(*LineOffset, *Discriminator),
+              FContext.getFunction());
         }
         if (std::error_code EC =
                 readFuncMetadata(ProfileHasAttribute, CalleeProfile))
@@ -1654,7 +1652,7 @@ std::error_code SampleProfileReaderGCC::readOneFunctionProfile(
     uint32_t LineOffset = Offset >> 16;
     uint32_t Discriminator = Offset & 0xffff;
     FProfile = &CallerProfile->functionSamplesAt(
-        LineLocation(LineOffset, Discriminator))[FunctionId(Name)];
+        LineLocation(LineOffset, Discriminator), FunctionId(Name));
   }
   FProfile->setFunction(FunctionId(Name));
 

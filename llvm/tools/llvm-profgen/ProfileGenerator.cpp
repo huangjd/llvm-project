@@ -607,15 +607,8 @@ FunctionSamples &ProfileGenerator::getLeafProfileAndAddTotalSamples(
     LineLocation Callsite(
         FrameVec[I - 1].Location.LineOffset,
         getBaseDiscriminator(FrameVec[I - 1].Location.Discriminator));
-    FunctionSamplesMap &SamplesMap =
-        FunctionProfile->functionSamplesAt(Callsite);
-    auto Ret =
-        SamplesMap.emplace(FrameVec[I].Func, FunctionSamples());
-    if (Ret.second) {
-      SampleContext Context(FrameVec[I].Func);
-      Ret.first->second.setContext(Context);
-    }
-    FunctionProfile = &Ret.first->second;
+    FunctionProfile =
+        &FunctionProfile->functionSamplesAt(Callsite, FrameVec[I].Func);
     FunctionProfile->addTotalSamples(Count);
     if (Binary->usePseudoProbes()) {
       const auto *FuncDesc = Binary->getFuncDescForGUID(

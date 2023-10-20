@@ -380,12 +380,9 @@ private:
       FunctionSamples *FS = FSToUpdate.front();
       FSToUpdate.pop();
       FS->GUIDToFuncNameMap = Map;
-      for (const auto &ICS : FS->getCallsiteSamples()) {
-        const FunctionSamplesMap &FSMap = ICS.second;
-        for (const auto &IFS : FSMap) {
-          FunctionSamples &FS = const_cast<FunctionSamples &>(IFS.second);
-          FSToUpdate.push(&FS);
-        }
+      for (const auto &IFS : FS->getCallsiteSamples()) {
+        FunctionSamples &FS = const_cast<FunctionSamples&>(IFS.second);
+        FSToUpdate.push(&FS);
       }
     }
   }
@@ -798,15 +795,11 @@ SampleProfileLoader::findIndirectCallFunctionSamples(
   if (T)
     for (const auto &T_C : T.get())
       Sum += T_C.second;
-  if (const FunctionSamplesMap *M = FS->findFunctionSamplesMapAt(CallSite)) {
-    if (M->empty())
-      return R;
-    for (const auto &NameFS : *M) {
-      Sum += NameFS.second.getHeadSamplesEstimate();
-      R.push_back(&NameFS.second);
-    }
-    llvm::sort(R, FSCompare);
+  for (const auto &NameFS : FS->findFunctionSamplesRangeAt(CallSite)) {
+    Sum += NameFS.second.getHeadSamplesEstimate();
+    R.push_back(&NameFS.second);
   }
+  llvm::sort(R, FSCompare);
   return R;
 }
 
@@ -1699,10 +1692,8 @@ void SampleProfileLoader::generateMDProfMetadata(Function &F) {
           // original indirect call site in the profile, including both
           // inlined and non-inlined targets.
           if (!FunctionSamples::ProfileIsCS) {
-            if (const FunctionSamplesMap *M =
-                    FS->findFunctionSamplesMapAt(CallSite)) {
-              for (const auto &NameFS : *M)
-                Sum += NameFS.second.getHeadSamplesEstimate();
+            for (const auto &NameFS : FS->findFunctionSamplesRangeAt(CallSite)) {
+              Sum += NameFS.second.getHeadSamplesEstimate();
             }
           }
           if (Sum)
@@ -2200,9 +2191,8 @@ void SampleProfileMatcher::countMismatchedSamples(const FunctionSamples &FS) {
     MismatchedFuncHashSamples += FS.getTotalSamples();
     return;
   }
-  for (const auto &I : FS.getCallsiteSamples())
-    for (const auto &CS : I.second)
-      countMismatchedSamples(CS.second);
+  for (const auto &CS : FS.getCallsiteSamples())
+    countMismatchedSamples(CS.second);
 }
 
 void SampleProfileMatcher::countProfileMismatches(
@@ -2266,10 +2256,8 @@ void SampleProfileMatcher::countProfileCallsiteMismatches(
       for (const auto &I : CTM.get())
         CallsiteSamples += I.second;
     }
-    const auto *FSMap = FS.findFunctionSamplesMapAt(Loc);
-    if (FSMap) {
-      for (const auto &I : *FSMap)
-        CallsiteSamples += I.second.getTotalSamples();
+    for (const auto &I : FS.findFunctionSamplesRangeAt(Loc)) {
+      CallsiteSamples += I.second.getTotalSamples();
     }
 
     bool CallsiteIsMatched = false;
@@ -2312,12 +2300,9 @@ void SampleProfileMatcher::findProfileAnchors(const FunctionSamples &FS,
     const LineLocation &Loc = I.first;
     if (isInvalidLineOffset(Loc.LineOffset))
       continue;
-    const auto &CalleeMap = I.second;
-    for (const auto &I : CalleeMap) {
-      auto Ret = ProfileAnchors.try_emplace(Loc,
-                                            std::unordered_set<FunctionId>());
-      Ret.first->second.insert(I.first);
-    }
+    auto Ret = ProfileAnchors.try_emplace(Loc,
+                                          std::unordered_set<FunctionId>());
+    Ret.first->second.insert(I.second.getFunction());
   }
 }
 
@@ -2525,10 +2510,9 @@ void SampleProfileMatcher::distributeIRToProfileLocationMap(
     FS.setIRToProfileLocationMap(&(ProfileMappings->second));
   }
 
-  for (auto &Inlinees : FS.getCallsiteSamples()) {
-    for (auto FS : Inlinees.second) {
-      distributeIRToProfileLocationMap(FS.second);
-    }
+  for (auto &FS : FS.getCallsiteSamples()) {
+    distributeIRToProfileLocationMap(
+        const_cast<FunctionSamples&>(FS.second));
   }
 }
 

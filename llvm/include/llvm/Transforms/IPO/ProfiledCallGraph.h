@@ -177,13 +177,11 @@ private:
       }
     }
 
-    for (const auto &CallsiteSamples : Samples.getCallsiteSamples()) {
-      for (const auto &InlinedSamples : CallsiteSamples.second) {
-        addProfiledFunction(InlinedSamples.first);
-        addProfiledCall(Samples.getFunction(), InlinedSamples.first,
-                        InlinedSamples.second.getHeadSamplesEstimate());
-        addProfiledCalls(InlinedSamples.second);
-      }
+    for (const auto &InlinedSamples : Samples.getCallsiteSamples()) {
+      addProfiledFunction(InlinedSamples.second.getFunction());
+      addProfiledCall(Samples.getFunction(), InlinedSamples.second.getFunction(),
+                      InlinedSamples.second.getHeadSamplesEstimate());
+      addProfiledCalls(InlinedSamples.second);
     }
   }
 

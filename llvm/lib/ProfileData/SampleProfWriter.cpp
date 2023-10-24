@@ -414,9 +414,12 @@ std::error_code SampleProfileWriterExtBinaryBase::writeCSNameTableSection() {
 
 std::error_code
 SampleProfileWriterExtBinaryBase::writeProfileSymbolListSection() {
-  if (ProfSymList && ProfSymList->size() > 0)
+  if (ProfSymList && ProfSymList->size() > 0) {
+    if (UseMD5)
+      ProfSymList->setUseMD5();
     if (std::error_code EC = ProfSymList->write(*OutputStream))
       return EC;
+  }
 
   return sampleprof_error::success;
 }

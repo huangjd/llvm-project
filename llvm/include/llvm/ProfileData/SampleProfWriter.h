@@ -270,6 +270,8 @@ public:
     // MD5 will be stored as plain uint64_t instead of variable-length
     // quantity format in NameTable section.
     addSectionFlag(SecNameTable, SecNameTableFlags::SecFlagFixedLengthMD5);
+    addSectionFlag(SecProfileSymbolList,
+                   SecProfileSymbolListFlags::SecFlagMD5Name);
   }
 
   // Set the profile to be partial. It means the profile is for

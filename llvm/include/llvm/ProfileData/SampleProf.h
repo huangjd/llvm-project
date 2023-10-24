@@ -187,6 +187,12 @@ enum class SecNameTableFlags : uint32_t {
   // the suffix when doing profile matching when seeing the flag.
   SecFlagUniqSuffix = (1 << 2)
 };
+
+enum class SecProfileSymbolListFlags : uint32_t {
+  SecFlagInValid = 0,
+  SecFlagMD5Name = (1 << 0),
+};
+
 enum class SecProfSummaryFlags : uint32_t {
   SecFlagInValid = 0,
   /// SecFlagPartial means the profile is for common/shared code.
@@ -232,6 +238,9 @@ static inline void verifySecFlag(SecType Type, SecFlagType Flag) {
     break;
   case SecProfSummary:
     IsFlagLegal = std::is_same<SecProfSummaryFlags, SecFlagType>();
+    break;
+  case SecProfileSymbolList:
+    IsFlagLegal = std::is_same<SecProfileSymbolListFlags, SecFlagType>();
     break;
   case SecFuncMetadata:
     IsFlagLegal = std::is_same<SecFuncMetadataFlags, SecFlagType>();
@@ -1514,19 +1523,33 @@ public:
     Syms.insert(Name.copy(Allocator));
   }
 
-  bool contains(StringRef Name) { return Syms.count(Name); }
+  void add(uint64_t MD5Name) {
+    MD5Syms.insert(MD5Name);
+  }
+
+  bool contains(StringRef Name) {
+    // getGUID is expensive, only check if ProfileSymbolList contains MD5.
+    return (MD5Syms.size() && MD5Syms.contains(Function::getGUID(Name)))
+           || Syms.contains(Name);
+  }
 
   void merge(const ProfileSymbolList &List) {
     for (auto Sym : List.Syms)
       add(Sym, true);
+    for (auto MD5Sym : List.MD5Syms)
+      MD5Syms.insert(MD5Sym);
   }
 
-  unsigned size() { return Syms.size(); }
+  unsigned size() {
+    return Syms.size() + MD5Syms.size();
+  }
 
   void setToCompress(bool TC) { ToCompress = TC; }
   bool toCompress() { return ToCompress; }
 
-  std::error_code read(const uint8_t *Data, uint64_t ListSize);
+  void setUseMD5() { UseMD5 = true; }
+
+  std::error_code read(const uint8_t *Data, uint64_t ListSize, bool DataUseMD5);
   std::error_code write(raw_ostream &OS);
   void dump(raw_ostream &OS = dbgs()) const;
 
@@ -1535,7 +1558,10 @@ private:
   // writing it into profile. The variable is unused when the symbol
   // list is read from an existing profile.
   bool ToCompress = false;
+  // Determine if only MD5 of the symbols should be written.
+  bool UseMD5 = false;
   DenseSet<StringRef> Syms;
+  DenseSet<uint64_t> MD5Syms;
   BumpPtrAllocator Allocator;
 };
 

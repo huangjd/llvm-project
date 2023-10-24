@@ -19,6 +19,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/EndianStream.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
@@ -313,7 +314,19 @@ LLVM_DUMP_METHOD void FunctionSamples::dump() const { print(dbgs(), 0); }
 #endif
 
 std::error_code ProfileSymbolList::read(const uint8_t *Data,
-                                        uint64_t ListSize) {
+                                        uint64_t ListSize, bool DataUseMD5) {
+  if (DataUseMD5) {
+    using namespace llvm::support;
+    uint64_t Num = ListSize / sizeof(uint64_t);
+    if (ListSize % sizeof(uint64_t))
+      return sampleprof_error::malformed;
+    Num = std::min(Num, (uint64_t) ProfileSymbolListCutOff);
+    for (uint64_t i = 0; i < Num; i++) {
+      add(endian::readNext<uint64_t, endianness::little, unaligned>(Data));
+    }
+    return sampleprof_error::success;
+  }
+
   const char *ListStart = reinterpret_cast<const char *>(Data);
   uint64_t Size = 0;
   uint64_t StrNum = 0;
@@ -386,6 +399,19 @@ void SampleContextTrimmer::trimAndMergeColdContextProfiles(
 }
 
 std::error_code ProfileSymbolList::write(raw_ostream &OS) {
+  // If we mix MD5 and non-MD5 symbols, only MD5 version can be written because
+  // it is an one-way function.
+  if (UseMD5 || MD5Syms.size() > 0) {
+    llvm::support::endian::Writer Writer(OS, llvm::endianness::little);
+    for (uint64_t MD5 : MD5Syms) {
+      Writer.write(MD5);
+    }
+    for (StringRef Sym : Syms) {
+      Writer.write(Function::getGUID(Sym));
+    }
+    return sampleprof_error::success;
+  }
+
   // Sort the symbols before output. If doing compression.
   // It will make the compression much more effective.
   std::vector<StringRef> SortedList(Syms.begin(), Syms.end());

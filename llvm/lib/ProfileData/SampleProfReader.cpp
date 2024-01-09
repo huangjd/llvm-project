@@ -539,8 +539,8 @@ SampleProfileReaderBinary::readContextFromTable(size_t *RetIdx) {
   return CSNameTable[*ContextIdx];
 }
 
-ErrorOr<std::pair<SampleContext, uint64_t>>
-SampleProfileReaderBinary::readSampleContextFromTable() {
+ErrorOr<SampleContext>
+SampleProfileReaderBinary::readSampleContextFromTable(size_t *RetIdx) {
   SampleContext Context;
   size_t Idx;
   if (ProfileIsCS) {
@@ -554,18 +554,8 @@ SampleProfileReaderBinary::readSampleContextFromTable() {
       return EC;
     Context = SampleContext(*FName);
   }
-  // Since MD5SampleContextStart may point to the profile's file data, need to
-  // make sure it is reading the same value on big endian CPU.
-  uint64_t Hash = support::endian::read64le(MD5SampleContextStart + Idx);
-  // Lazy computing of hash value, write back to the table to cache it. Only
-  // compute the context's hash value if it is being referenced for the first
-  // time.
-  if (Hash == 0) {
-    assert(MD5SampleContextStart == MD5SampleContextTable.data());
-    Hash = Context.getHashCode();
-    support::endian::write64le(&MD5SampleContextTable[Idx], Hash);
-  }
-  return std::make_pair(Context, Hash);
+  *RetIdx = Idx;
+  return Context;
 }
 
 std::error_code
@@ -658,18 +648,25 @@ SampleProfileReaderBinary::readFuncProfile(const uint8_t *Start) {
   if (std::error_code EC = NumHeadSamples.getError())
     return EC;
 
-  auto FContextHash(readSampleContextFromTable());
-  if (std::error_code EC = FContextHash.getError())
+  size_t Idx;
+  auto FContext(readSampleContextFromTable(&Idx));
+  if (std::error_code EC = FContext.getError())
     return EC;
 
-  auto &[FContext, Hash] = *FContextHash;
-  // Use the cached hash value for insertion instead of recalculating it.
-  auto Res = Profiles.try_emplace(Hash, FContext, FunctionSamples());
+  // Use the cached hash value for insertion instead of recalculating it, if it
+  // is available.
+  uint64_t Hash = support::endian::read64le(MD5SampleContextStart + Idx);
+  std::pair<decltype(Profiles)::iterator, bool> Res;
+  if (Hash) {
+    Res = Profiles.try_emplace(Hash, *FContext, FunctionSamples());
+  } else {
+    Res = Profiles.try_emplace(*FContext, FunctionSamples());
+  }
   FunctionSamples &FProfile = Res.first->second;
-  FProfile.setContext(FContext);
+  FProfile.setContext(*FContext);
   FProfile.addHeadSamples(*NumHeadSamples);
 
-  if (FContext.hasContext())
+  if (FContext->hasContext())
     CSProfileCount++;
 
   if (std::error_code EC = readProfile(FProfile))
@@ -709,12 +706,15 @@ std::error_code SampleProfileReaderExtBinaryBase::readOneSection(
     bool FixedLengthMD5 =
         hasSecFlag(Entry, SecNameTableFlags::SecFlagFixedLengthMD5);
     bool UseMD5 = hasSecFlag(Entry, SecNameTableFlags::SecFlagMD5Name);
+    bool OriginalName =
+        hasSecFlag(Entry, SecNameTableFlags::SecFlagOriginalName);
     // UseMD5 means if THIS section uses MD5, ProfileIsMD5 means if the entire
     // profile uses MD5 for function name matching in IPO passes.
-    ProfileIsMD5 = ProfileIsMD5 || UseMD5;
+    ProfileIsMD5 = ProfileIsMD5 || UseMD5 || FixedLengthMD5;
     FunctionSamples::HasUniqSuffix =
         hasSecFlag(Entry, SecNameTableFlags::SecFlagUniqSuffix);
-    if (std::error_code EC = readNameTableSec(UseMD5, FixedLengthMD5))
+    if (std::error_code EC = readNameTableSec(UseMD5, FixedLengthMD5,
+                                              OriginalName))
       return EC;
     break;
   }
@@ -771,6 +771,13 @@ bool SampleProfileReaderExtBinaryBase::useFuncOffsetList() const {
   if (ProfileIsCS)
     return true;
 
+  // If the original name table is available, and a remapper is present, the
+  // remapped name of every function needed to be matched against the module, so
+  // use the list container since each entry is accessed. This preceeds useMD5
+  // because we have the original names.
+  if (OriginalNameTable.size() != 0 && Remapper)
+    return true;
+
   // If the profile is MD5, use the map container to lookup functions in
   // the module. A remapper has no use on MD5 names.
   if (useMD5())
@@ -790,6 +797,29 @@ bool SampleProfileReaderExtBinaryBase::useFuncOffsetList() const {
   return false;
 }
 
+bool SampleProfileReaderExtBinaryBase::readOriginalNames() const {
+  // If we are using LLVM tools, we want to keep the original names in the
+  // output.
+  if (!M)
+    return true;
+
+  // If a remapper is present, original names are needed to be remapped.
+  if (Remapper)
+    return true;
+
+  // If the preceeding name table is missing or not MD5, or it already has a
+  // corresponding original name table, it indicates the profile is malformed
+  // but recoverable. There is no other choice but to read this name table for
+  // sections following it.
+  if (NameTable.size() == 0 || NameTable[0].isStringRef() ||
+      OriginalNameTable.size() > 0) {
+    errs() << "A MD5 name table should preceed a supplement name table.";
+    return true;
+  }
+
+  // Otherwise we can skip reading the original name table entirely.
+  return false;
+}
 
 bool SampleProfileReaderExtBinaryBase::collectFuncsFromModule() {
   if (!M)
@@ -817,21 +847,33 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncOffsetTable() {
     FuncOffsetTable.reserve(*Size);
 
   for (uint64_t I = 0; I < *Size; ++I) {
-    auto FContextHash(readSampleContextFromTable());
-    if (std::error_code EC = FContextHash.getError())
+    size_t Idx;
+    auto FContext(readSampleContextFromTable(&Idx));
+    if (std::error_code EC = FContext.getError())
       return EC;
 
-    auto &[FContext, Hash] = *FContextHash;
     auto Offset = readNumber<uint64_t>();
     if (std::error_code EC = Offset.getError())
       return EC;
 
     if (UseFuncOffsetList)
-      FuncOffsetList.emplace_back(FContext, *Offset);
-    else
+      FuncOffsetList.emplace_back(FContext, *Offset, Idx);
+    else {
+      // Since MD5SampleContextStart may point to the profile's file data, need
+      // to make sure it is reading the same value on big endian CPU.
+      uint64_t Hash = support::endian::read64le(MD5SampleContextStart + Idx);
+      // Lazy computing of hash value, write back to the table to cache it. Only
+      // compute the context's hash value if it is being referenced for the
+      // first time.
+      if (Hash == 0) {
+        assert(MD5SampleContextStart == MD5SampleContextTable.data());
+        Hash = FContext->getHashCode();
+        support::endian::write64le(&MD5SampleContextTable[Idx], Hash);
+      }
       // Because Porfiles replace existing value with new value if collision
       // happens, we also use the latest offset so that they are consistent.
       FuncOffsetTable[Hash] = *Offset;
+    }
  }
 
  return sampleprof_error::success;
@@ -904,6 +946,18 @@ std::error_code SampleProfileReaderExtBinaryBase::readFuncProfiles() {
           if (std::error_code EC = readFuncProfile(FuncProfileAddr))
             return EC;
         }
+      }
+    } else if (OriginalNameTable.size() != 0 && Remapper) {
+      assert(useFuncOffsetList());aaaa
+      for (auto NameOffset : FuncOffsetList) {
+        SampleContext FContext(NameOffset.first);
+        auto FuncName = FContext.getFunction();
+        StringRef FuncNameStr = FuncName.stringRef();
+        if (!FuncsToUse.count(FuncNameStr) && !Remapper->exist(FuncNameStr))
+          continue;
+        const uint8_t *FuncProfileAddr = Start + NameOffset.second;
+        if (std::error_code EC = readFuncProfile(FuncProfileAddr))
+          return EC;
       }
     } else if (useMD5()) {
       assert(!useFuncOffsetList());
@@ -990,7 +1044,24 @@ std::error_code SampleProfileReaderExtBinaryBase::readImpl() {
   const uint8_t *BufStart =
       reinterpret_cast<const uint8_t *>(Buffer->getBufferStart());
 
+  bool PreviousSectionIsMD5 = false;
+
   for (auto &Entry : SecHdrTable) {
+    // If in compilation mode, and a remapper is not used, skip the original
+    // names section if the previous section is MD5 names, because it can be
+    // expensive to decompress and read.
+    if (Entry.Type == SecType::SecNameTable &&
+        (hasSecFlag(Entry, SecNameTableFlags::SecFlagMD5Name) ||
+         hasSecFlag(Entry, SecNameTableFlags::SecFlagFixedLengthMD5))) {
+      PreviousSectionIsMD5 = true;
+    } else if (Entry.Type == SecType::SecNameTable &&
+               hasSecFlag(Entry, SecNameTableFlags::SecFlagOriginalName) &&
+               M && !Remapper && PreviousSectionIsMD5) {
+      PreviousSectionIsMD5 = false;
+      continue;
+    } else
+      PreviousSectionIsMD5 = false;
+
     // Skip empty section.
     if (!Entry.Size)
       continue;
@@ -1044,40 +1115,32 @@ std::error_code SampleProfileReaderExtBinary::verifySPMagic(uint64_t Magic) {
   return sampleprof_error::bad_magic;
 }
 
-std::error_code SampleProfileReaderBinary::readNameTable() {
+std::error_code SampleProfileReaderBinary::readNameTable(bool KeepMD5Cache) {
   auto Size = readNumber<size_t>();
   if (std::error_code EC = Size.getError())
     return EC;
 
-  // Normally if useMD5 is true, the name table should have MD5 values, not
-  // strings, however in the case that ExtBinary profile has multiple name
-  // tables mixing string and MD5, all of them have to be normalized to use MD5,
-  // because optimization passes can only handle either type.
-  bool UseMD5 = useMD5();
-
   NameTable.clear();
   NameTable.reserve(*Size);
+  // If the profile does not have context, MD5SampleContextTable maps to
+  // NameTable. If the profile has context, we expect a CSNameTable to follow,
+  // and MD5SampleContextTable maps to it instead.
   if (!ProfileIsCS) {
-    MD5SampleContextTable.clear();
-    if (UseMD5)
-      MD5SampleContextTable.reserve(*Size);
-    else
-      // If we are using strings, delay MD5 computation since only a portion of
-      // names are used by top level functions. Use 0 to indicate MD5 value is
-      // to be calculated as no known string has a MD5 value of 0.
+    // Even if MD5SampleContextTable is meant to be kept, if its size does not
+    // match, we have to reset it to prevent array out of bounds.
+    if (!KeepMD5Cache || *Size != MD5SampleContextTable.size()) {
+      MD5SampleContextTable.clear();
+      // Delay MD5 computation since only a portion of names are used by top
+      // level functions. Use 0 as a placeholder for lazy computation of MD5, as
+      // no known string has a MD5 value of 0.
       MD5SampleContextTable.resize(*Size);
+    }
   }
   for (size_t I = 0; I < *Size; ++I) {
     auto Name(readString());
     if (std::error_code EC = Name.getError())
       return EC;
-    if (UseMD5) {
-      FunctionId FID(*Name);
-      if (!ProfileIsCS)
-        MD5SampleContextTable.emplace_back(FID.getHashCode());
-      NameTable.emplace_back(FID);
-    } else
-      NameTable.push_back(FunctionId(*Name));
+    NameTable.emplace_back(FunctionId(*Name));
   }
   if (!ProfileIsCS)
     MD5SampleContextStart = MD5SampleContextTable.data();
@@ -1086,7 +1149,8 @@ std::error_code SampleProfileReaderBinary::readNameTable() {
 
 std::error_code
 SampleProfileReaderExtBinaryBase::readNameTableSec(bool IsMD5,
-                                                   bool FixedLengthMD5) {
+                                                   bool FixedLengthMD5,
+                                                   bool OriginalName) {
   if (FixedLengthMD5) {
     if (!IsMD5)
       errs() << "If FixedLengthMD5 is true, UseMD5 has to be true";
@@ -1137,7 +1201,7 @@ SampleProfileReaderExtBinaryBase::readNameTableSec(bool IsMD5,
     return sampleprof_error::success;
   }
 
-  return SampleProfileReaderBinary::readNameTable();
+  return SampleProfileReaderBinary::readNameTable(OriginalName);
 }
 
 // Read in the CS name table section, which basically contains a list of context

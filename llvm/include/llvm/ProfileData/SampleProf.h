@@ -184,7 +184,11 @@ enum class SecNameTableFlags : uint32_t {
   SecFlagFixedLengthMD5 = (1 << 1),
   // Profile contains ".__uniq." suffix name. Compiler shouldn't strip
   // the suffix when doing profile matching when seeing the flag.
-  SecFlagUniqSuffix = (1 << 2)
+  SecFlagUniqSuffix = (1 << 2),
+  // Indicate this name table contains the original function names of the
+  // previous MD5 name table. This is used when the profile needs the original
+  // function names for the remapper and the performance of using MD5 profile.
+  SecFlagOriginalName = (1 << 3)
 };
 enum class SecProfSummaryFlags : uint32_t {
   SecFlagInValid = 0,

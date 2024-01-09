@@ -631,8 +631,10 @@ protected:
   /// Read profile summary.
   std::error_code readSummary();
 
-  /// Read the whole name table.
-  std::error_code readNameTable();
+  /// Read the whole name table. If KeepMD5Cache is set, do not erase
+  /// MD5SampleContextTable if this name table contains original names of the
+  /// previous name table in MD5.
+  std::error_code readNameTable(bool KeepMD5Cache = false);
 
   /// Read a string indirectly via the name table. Optionally return the index.
   ErrorOr<FunctionId> readStringFromTable(size_t *RetIdx = nullptr);
@@ -642,8 +644,8 @@ protected:
   ErrorOr<SampleContextFrames> readContextFromTable(size_t *RetIdx = nullptr);
 
   /// Read a context indirectly via the CSNameTable if the profile has context,
-  /// otherwise same as readStringFromTable, also return its hash value.
-  ErrorOr<std::pair<SampleContext, uint64_t>> readSampleContextFromTable();
+  /// otherwise same as readStringFromTable.
+  ErrorOr<SampleContext> readSampleContextFromTable(size_t *RetIdx = nullptr);
 
   /// Points to the current location in the buffer.
   const uint8_t *Data = nullptr;
@@ -725,7 +727,8 @@ protected:
                                    FunctionSamples *FProfile);
   std::error_code readFuncOffsetTable();
   std::error_code readFuncProfiles();
-  std::error_code readNameTableSec(bool IsMD5, bool FixedLengthMD5);
+  std::error_code readNameTableSec(bool IsMD5, bool FixedLengthMD5,
+                                   bool OriginalName);
   std::error_code readCSNameTableSec();
   std::error_code readProfileSymbolList();
 
@@ -749,7 +752,7 @@ protected:
 
   /// The list version of FuncOffsetTable. This is used if every entry is
   /// being accessed.
-  std::vector<std::pair<SampleContext, uint64_t>> FuncOffsetList;
+  std::vector<std::tuple<SampleContext, uint64_t, size_t>> FuncOffsetList;
 
   /// The set containing the functions to use when compiling a module.
   DenseSet<StringRef> FuncsToUse;
